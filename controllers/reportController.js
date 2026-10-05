@@ -221,7 +221,7 @@ exports.exportReport = async (req, res) => {
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
       let maxHeight = 14;
       values.forEach((val, i) => {
-        const text = String(val ?? '-');
+        const text = val === null || val === undefined || val === '' ? '-' : String(val);
         const h = doc.heightOfString(text, { width: colWidth - 6 });
         maxHeight = Math.max(maxHeight, h);
         doc.text(text, startX + i * colWidth, y, { width: colWidth - 6 });
