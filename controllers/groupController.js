@@ -376,6 +376,13 @@ exports.removeSavingsTarget = async (req, res) => {
       [id]
     );
 
+     await logActivity({
+      userId,
+      groupId: id,
+      actionType: 'savings_target_removed',
+      description: `You removed the KES ${existing.savings_target} savings target for ${existing.name}`
+    });
+
     res.json({ success: true, message: 'Savings target removed successfully' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
