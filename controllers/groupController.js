@@ -303,7 +303,7 @@ exports.getMySavingsProgress = async (req, res) => {
   }
 };
 
-// SET SAVINGS TARGET (treasurer/chair only)
+// SET SAVINGS TARGET (treasurer/chair only) -- archives the previous target first, if any
 exports.setSavingsTarget = async (req, res) => {
   try {
     const { id } = req.params;
@@ -319,6 +319,20 @@ exports.setSavingsTarget = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can set the savings target' });
     }
 
+    const [groupRows] = await db.query(
+      'SELECT savings_target, target_start_date FROM groups_table WHERE id = ?',
+      [id]
+    );
+    const existing = groupRows[0];
+
+    if (existing && existing.savings_target) {
+      await db.query(
+        `INSERT INTO savings_target_history (group_id, savings_target, target_start_date, target_end_date, ended_reason)
+         VALUES (?, ?, ?, CURDATE(), 'replaced')`,
+        [id, existing.savings_target, existing.target_start_date]
+      );
+    }
+
     await db.query(
       'UPDATE groups_table SET savings_target = ?, target_start_date = CURDATE() WHERE id = ?',
       [savings_target, id]
@@ -330,6 +344,43 @@ exports.setSavingsTarget = async (req, res) => {
   }
 };
 
+// REMOVE SAVINGS TARGET (treasurer/chair only) -- archives it rather than discarding it
+exports.removeSavingsTarget = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const role = await getMembership(id, userId);
+    if (role !== 'treasurer' && role !== 'chair') {
+      return res.status(403).json({ success: false, message: 'Only treasurer or chair can remove the savings target' });
+    }
+
+    const [groupRows] = await db.query(
+      'SELECT savings_target, target_start_date FROM groups_table WHERE id = ?',
+      [id]
+    );
+    const existing = groupRows[0];
+
+    if (!existing || !existing.savings_target) {
+      return res.status(400).json({ success: false, message: 'This group has no savings target set' });
+    }
+
+    await db.query(
+      `INSERT INTO savings_target_history (group_id, savings_target, target_start_date, target_end_date, ended_reason)
+       VALUES (?, ?, ?, CURDATE(), 'removed')`,
+      [id, existing.savings_target, existing.target_start_date]
+    );
+
+    await db.query(
+      'UPDATE groups_table SET savings_target = NULL, target_start_date = NULL WHERE id = ?',
+      [id]
+    );
+
+    res.json({ success: true, message: 'Savings target removed successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
 // GET SAVINGS PROGRESS FOR ALL MEMBERS
 // (combines regular cycle contributions + voluntary extra savings deposits)
 exports.getSavingsProgress = async (req, res) => {
@@ -533,6 +584,31 @@ exports.deleteGroup = async (req, res) => {
     await db.query('DELETE FROM groups_table WHERE id = ?', [id]);
 
     res.json({ success: true, message: 'Group deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// GET SAVINGS TARGET HISTORY FOR A GROUP
+exports.getSavingsTargetHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const role = await getMembership(id, userId);
+    if (!role) {
+      return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+    }
+
+    const [rows] = await db.query(
+      `SELECT id, savings_target, target_start_date, target_end_date, ended_reason, created_at
+       FROM savings_target_history
+       WHERE group_id = ?
+       ORDER BY target_end_date DESC`,
+      [id]
+    );
+
+    res.json({ success: true, history: rows });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

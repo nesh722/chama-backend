@@ -126,3 +126,13 @@ CREATE TABLE savings_deposits (
   FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+CREATE TABLE savings_target_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  savings_target DECIMAL(10,2) NOT NULL,
+  target_start_date DATE NOT NULL,
+  target_end_date DATE NOT NULL,
+  ended_reason ENUM('replaced', 'removed') NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE
+);

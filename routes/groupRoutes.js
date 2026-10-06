@@ -16,6 +16,8 @@ router.get('/:id', authMiddleware, groupController.getGroupDetails);
 router.get('/:id/invite', authMiddleware, groupController.getInviteToken);
 router.post('/:id/regenerate-invite', authMiddleware, groupController.regenerateInviteToken);
 router.post('/:id/set-target', authMiddleware, groupController.setSavingsTarget);
+router.delete('/:id/savings-target', authMiddleware, groupController.removeSavingsTarget);
+router.get('/:id/savings-target-history', authMiddleware, groupController.getSavingsTargetHistory);
 router.get('/:id/savings-progress', authMiddleware, groupController.getSavingsProgress);
 router.patch('/:id/change-role', authMiddleware, groupController.changeRole);
 router.post('/:id/remove-member', authMiddleware, groupController.removeMember);
