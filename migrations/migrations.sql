@@ -136,3 +136,4 @@ CREATE TABLE savings_target_history (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE
 );
+ALTER TABLE users ADD COLUMN push_token VARCHAR(255) DEFAULT NULL;

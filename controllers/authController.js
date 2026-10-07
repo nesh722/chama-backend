@@ -317,3 +317,20 @@ exports.deleteAccount = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// SAVE/UPDATE THIS DEVICE'S PUSH TOKEN
+exports.savePushToken = async (req, res) => {
+  try {
+    const { push_token } = req.body;
+    const userId = req.user.userId;
+
+    if (!push_token) {
+      return res.status(400).json({ success: false, message: 'push_token is required' });
+    }
+
+    await db.query('UPDATE users SET push_token = ? WHERE id = ?', [push_token, userId]);
+    res.json({ success: true, message: 'Push token saved' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};

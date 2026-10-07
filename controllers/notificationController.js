@@ -1,11 +1,29 @@
 const db = require('../config/db');
+const { Expo } = require('expo-server-sdk');
 
-// Helper: create a notification (used internally by other controllers too, if you want to expand later)
+const expo = new Expo();
+
+// Helper: create a notification (used internally by other controllers too)
 async function createNotification(userId, title, message) {
   await db.query(
     'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
     [userId, title, message]
   );
+
+  // Also send a push notification, if this user has a registered device
+  try {
+    const [rows] = await db.query('SELECT push_token FROM users WHERE id = ?', [userId]);
+    const token = rows[0]?.push_token;
+
+    if (token && Expo.isExpoPushToken(token)) {
+      await expo.sendPushNotificationsAsync([
+        { to: token, sound: 'default', title, body: message }
+      ]);
+    }
+  } catch (pushErr) {
+    // Push failures shouldn't break the in-app notification -- just log it
+    console.log('Push notification failed:', pushErr.message);
+  }
 }
 
 // GET MY NOTIFICATIONS
