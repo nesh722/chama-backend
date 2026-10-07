@@ -320,12 +320,13 @@ exports.setSavingsTarget = async (req, res) => {
     }
 
     const [groupRows] = await db.query(
-      'SELECT savings_target, target_start_date FROM groups_table WHERE id = ?',
+      'SELECT savings_target, target_start_date, name FROM groups_table WHERE id = ?',
       [id]
     );
     const existing = groupRows[0];
+    const isUpdate = !!(existing && existing.savings_target);
 
-    if (existing && existing.savings_target) {
+    if (isUpdate) {
       await db.query(
         `INSERT INTO savings_target_history (group_id, savings_target, target_start_date, target_end_date, ended_reason)
          VALUES (?, ?, ?, CURDATE(), 'replaced')`,
@@ -337,6 +338,15 @@ exports.setSavingsTarget = async (req, res) => {
       'UPDATE groups_table SET savings_target = ?, target_start_date = CURDATE() WHERE id = ?',
       [savings_target, id]
     );
+
+    await logActivity({
+      userId,
+      groupId: id,
+      actionType: isUpdate ? 'savings_target_updated' : 'savings_target_set',
+      description: isUpdate
+        ? `You updated the savings target for ${existing.name} to KES ${savings_target} per cycle (was KES ${existing.savings_target})`
+        : `You set a savings target of KES ${savings_target} per cycle for ${existing.name}`
+    });
 
     res.json({ success: true, message: 'Savings target set successfully' });
   } catch (err) {
@@ -356,7 +366,7 @@ exports.removeSavingsTarget = async (req, res) => {
     }
 
     const [groupRows] = await db.query(
-      'SELECT savings_target, target_start_date FROM groups_table WHERE id = ?',
+      'SELECT savings_target, target_start_date, name FROM groups_table WHERE id = ?',
       [id]
     );
     const existing = groupRows[0];

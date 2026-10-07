@@ -53,6 +53,7 @@ exports.logSavings = async (req, res) => {
 };
 
 // GET ALL EXTRA SAVINGS FOR A GROUP (with member names)
+// Members see only their own entries; treasurer/chair see everyone's.
 exports.getGroupSavings = async (req, res) => {
   try {
     const { groupId } = req.params;
@@ -63,14 +64,17 @@ exports.getGroupSavings = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You are not a member of this group' });
     }
 
-    const [rows] = await db.query(
-      `SELECT s.id, u.full_name, s.amount, s.note, s.deposited_at
-       FROM savings_deposits s
-       JOIN users u ON s.user_id = u.id
-       WHERE s.group_id = ?
-       ORDER BY s.deposited_at DESC`,
-      [groupId]
-    );
+    const isApprover = role === 'treasurer' || role === 'chair';
+
+    const query = `
+      SELECT s.id, u.full_name, s.amount, s.note, s.deposited_at
+      FROM savings_deposits s
+      JOIN users u ON s.user_id = u.id
+      WHERE s.group_id = ? ${isApprover ? '' : 'AND s.user_id = ?'}
+      ORDER BY s.deposited_at DESC`;
+    const params = isApprover ? [groupId] : [groupId, userId];
+
+    const [rows] = await db.query(query, params);
 
     res.json({ success: true, savings: rows });
   } catch (err) {
