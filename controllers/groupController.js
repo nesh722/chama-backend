@@ -630,3 +630,37 @@ exports.getSavingsTargetHistory = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// UPDATE GROUP DETAILS (treasurer/chair only)
+exports.updateGroup = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, contribution_amount, contribution_frequency } = req.body;
+    const userId = req.user.userId;
+
+    const role = await getMembership(id, userId);
+    if (role !== 'treasurer' && role !== 'chair') {
+      return res.status(403).json({ success: false, message: 'Only treasurer or chair can edit group details' });
+    }
+
+    if (!name || !contribution_amount) {
+      return res.status(400).json({ success: false, message: 'Name and contribution amount are required' });
+    }
+
+    await db.query(
+      'UPDATE groups_table SET name = ?, description = ?, contribution_amount = ?, contribution_frequency = ? WHERE id = ?',
+      [name, description || null, contribution_amount, contribution_frequency || 'monthly', id]
+    );
+
+    await logActivity({
+      userId,
+      groupId: id,
+      actionType: 'group_updated',
+      description: `You updated ${name}'s group details`
+    });
+
+    res.json({ success: true, message: 'Group updated successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
