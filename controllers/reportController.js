@@ -13,6 +13,17 @@ function isApprover(role) {
   return role === 'treasurer' || role === 'chair';
 }
 
+// Cycles between two dates (same logic as the live progress calculation, but
+// measured up to an end date instead of "now")
+function cyclesBetween(startDate, endDate, frequency) {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (frequency === 'weekly') {
+    return Math.max(Math.floor((end - start) / (7 * 86400000)) + 1, 1);
+  }
+  return Math.max((end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth()) + 1, 1);
+}
+
 // Builds { title, columns, rows } for a given report type, already
 // scoped to the viewer's role (full group data for treasurer/chair,
 // own data only for a regular member).
@@ -118,44 +129,91 @@ async function buildReport(groupId, userId, role, type) {
       };
     }
 
-    case 'savings_target': {
+       case 'savings_target': {
       const [groupRows] = await db.query(
         'SELECT savings_target, target_start_date, contribution_frequency FROM groups_table WHERE id = ?',
         [groupId]
       );
       const group = groupRows[0];
-      if (!group || !group.savings_target) {
-        return { title: 'Savings Target Progress', columns: ['Member', 'Paid To Date', 'Target To Date', 'Status'], rows: [] };
+      const fmtDate = (d) => new Date(d).toLocaleDateString();
+      const reportRows = [];
+
+      // --- Current target, if one is set (progress counts everything paid so far) ---
+      if (group && group.savings_target) {
+        const targetToDate =
+          parseFloat(group.savings_target) *
+          cyclesBetween(group.target_start_date, new Date(), group.contribution_frequency);
+
+        const [currentMembers] = await db.query(
+          `SELECT u.id, u.full_name,
+            COALESCE((SELECT SUM(amount) FROM contributions WHERE user_id = u.id AND group_id = gm.group_id AND status = 'paid'), 0)
+            + COALESCE((SELECT SUM(amount) FROM savings_deposits WHERE user_id = u.id AND group_id = gm.group_id), 0) AS paidToDate
+           FROM group_members gm
+           JOIN users u ON gm.user_id = u.id
+           WHERE gm.group_id = ? ${scoped ? '' : 'AND u.id = ?'}
+           GROUP BY u.id, u.full_name`,
+          scoped ? [groupId] : [groupId, userId]
+        );
+
+        for (const m of currentMembers) {
+          const paid = parseFloat(m.paidToDate);
+          reportRows.push([
+            `Current (since ${fmtDate(group.target_start_date)})`,
+            m.full_name,
+            targetToDate,
+            paid,
+            paid >= targetToDate ? 'On Track' : 'Behind'
+          ]);
+        }
       }
 
-      const now = new Date();
-      const start = new Date(group.target_start_date);
-      let cyclesElapsed;
-      if (group.contribution_frequency === 'weekly') {
-        cyclesElapsed = Math.max(Math.floor((now - start) / (7 * 86400000)) + 1, 1);
-      } else {
-        cyclesElapsed = Math.max((now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth()) + 1, 1);
-      }
-      const targetToDate = parseFloat(group.savings_target) * cyclesElapsed;
+      // --- Archived targets: how each member did during that target's active window ---
+      const [history] = await db.query(
+        `SELECT id, savings_target, target_start_date, target_end_date, ended_reason
+         FROM savings_target_history
+         WHERE group_id = ?
+         ORDER BY target_end_date DESC, id DESC`,
+        [groupId]
+      );
 
-      const query = `
-        SELECT u.id, u.full_name,
-          COALESCE((SELECT SUM(amount) FROM contributions WHERE user_id = u.id AND group_id = gm.group_id AND status = 'paid'), 0)
-          + COALESCE((SELECT SUM(amount) FROM savings_deposits WHERE user_id = u.id AND group_id = gm.group_id), 0) AS paidToDate
-        FROM group_members gm
-        JOIN users u ON gm.user_id = u.id
-        WHERE gm.group_id = ? ${scoped ? '' : 'AND u.id = ?'}
-        GROUP BY u.id, u.full_name`;
-      const params = scoped ? [groupId] : [groupId, userId];
-      const [rows] = await db.query(query, params);
+      for (const h of history) {
+        const targetForPeriod =
+          parseFloat(h.savings_target) *
+          cyclesBetween(h.target_start_date, h.target_end_date, group.contribution_frequency);
+
+        const [periodMembers] = await db.query(
+          `SELECT u.id, u.full_name,
+            COALESCE((SELECT SUM(amount) FROM contributions
+                      WHERE user_id = u.id AND group_id = gm.group_id AND status = 'paid'
+                        AND paid_at >= ? AND paid_at < DATE_ADD(?, INTERVAL 1 DAY)), 0)
+            + COALESCE((SELECT SUM(amount) FROM savings_deposits
+                        WHERE user_id = u.id AND group_id = gm.group_id
+                          AND deposited_at >= ? AND deposited_at < DATE_ADD(?, INTERVAL 1 DAY)), 0) AS paidInPeriod
+           FROM group_members gm
+           JOIN users u ON gm.user_id = u.id
+           WHERE gm.group_id = ? ${scoped ? '' : 'AND u.id = ?'}
+           GROUP BY u.id, u.full_name`,
+          scoped
+            ? [h.target_start_date, h.target_end_date, h.target_start_date, h.target_end_date, groupId]
+            : [h.target_start_date, h.target_end_date, h.target_start_date, h.target_end_date, groupId, userId]
+        );
+
+        for (const m of periodMembers) {
+          const paid = parseFloat(m.paidInPeriod);
+          reportRows.push([
+            `${fmtDate(h.target_start_date)} - ${fmtDate(h.target_end_date)} (${h.ended_reason})`,
+            m.full_name,
+            targetForPeriod,
+            paid,
+            paid >= targetForPeriod ? 'Met' : 'Short'
+          ]);
+        }
+      }
 
       return {
-        title: 'Savings Target Progress',
-        columns: ['Member', 'Paid To Date', 'Target To Date', 'Status'],
-        rows: rows.map(r => {
-          const paid = parseFloat(r.paidToDate);
-          return [r.full_name, paid, targetToDate, paid >= targetToDate ? 'On Track' : 'Behind'];
-        })
+        title: 'Savings Target History',
+        columns: ['Period', 'Member', 'Target', 'Paid', 'Status'],
+        rows: reportRows
       };
     }
 

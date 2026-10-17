@@ -52,7 +52,7 @@ utils/             # Shared helpers (activity logging, email service)
 - Only one outstanding loan per member per group at a time
 - Account deletion is blocked while the user has outstanding loans, is the sole treasurer/chair of any group, or has created a group that still exists
 - Reports are scoped by role: members see only their own data, treasurer/chair see the full group
-
+- Login and password reset are rate limited.
 ## Getting Started
 
 1. **Install dependencies**
@@ -98,11 +98,10 @@ utils/             # Shared helpers (activity logging, email service)
 
 ## Known Limitations / Technical Debt
 
-- No rate-limiting on password reset requests
 - A legacy join-by-numeric-group-ID endpoint still exists but is unused in the current UI, which now uses QR/invite-token joining exclusively
 
 ## Roadmap
 
-- [ ] Rate-limit password reset requests
+
 - [ ] Broader test coverage for recently added features (QR invites, loan due dates, Extra Savings, Reports)
 - [ ] Project documentation (SRS, ERD, architecture diagrams, testing chapter)

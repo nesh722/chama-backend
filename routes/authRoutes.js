@@ -2,12 +2,14 @@ const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const authMiddleware = require('../middleware/authMiddleware');
+const { resetRequestLimiter, resetAttemptLimiter, loginLimiter,
+  loginAccountLimiter } = require('../middleware/rateLimiters');
 
 router.post('/register', authController.register);
-router.post('/login', authController.login);
+router.post('/login', loginLimiter, loginAccountLimiter, authController.login);
 router.get('/profile', authMiddleware, authController.getProfile);
-router.post('/request-password-reset', authController.requestPasswordReset);
-router.post('/reset-password', authController.resetPassword);
+router.post('/request-password-reset', resetRequestLimiter, authController.requestPasswordReset);
+router.post('/reset-password', resetAttemptLimiter, authController.resetPassword);
 router.post('/upload-avatar', authMiddleware, authController.uploadMiddleware, authController.uploadAvatar);
 router.put('/update-profile', authMiddleware, authController.updateProfile);
 router.put('/change-email', authMiddleware, authController.changeEmail);

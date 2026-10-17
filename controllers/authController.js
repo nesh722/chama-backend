@@ -144,7 +144,23 @@ exports.requestPasswordReset = async (req, res) => {
       return res.json({ success: true, message: 'If that email exists, a reset link has been sent' });
     }
 
-    const userId = users[0].id;
+        const userId = users[0].id;
+
+    // Per-account cap: at most 3 reset emails per rolling hour. Resets expire after
+    // 30 minutes, so "expires_at within the last 30 min" means "created in the last hour".
+    const [recent] = await db.query(
+      `SELECT COUNT(*) AS count FROM password_resets
+       WHERE user_id = ? AND expires_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE)`,
+      [userId]
+    );
+    if (recent[0].count >= 3) {
+      // Same generic response as every other case, so this doesn't reveal that the email exists
+      return res.json({ success: true, message: 'If that email exists, a reset code has been sent to it.' });
+    }
+
+    // Invalidate any earlier unused codes so only the newest one works
+    await db.query('UPDATE password_resets SET used = TRUE WHERE user_id = ? AND used = FALSE', [userId]);
+
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
 
@@ -152,7 +168,6 @@ exports.requestPasswordReset = async (req, res) => {
       'INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)',
       [userId, token, expiresAt]
     );
-
         await sendPasswordResetEmail(email, token);
 
     res.json({ success: true, message: 'If that email exists, a reset code has been sent to it.' });
