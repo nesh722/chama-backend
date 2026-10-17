@@ -137,3 +137,17 @@ CREATE TABLE savings_target_history (
   FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE
 );
 ALTER TABLE users ADD COLUMN push_token VARCHAR(255) DEFAULT NULL;
+
+CREATE TABLE payout_rotation_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  cycle_number INT NOT NULL,
+  user_id INT NOT NULL,
+  rotation_order INT NOT NULL,
+  has_received BOOLEAN NOT NULL,
+  received_at DATETIME DEFAULT NULL,
+  amount DECIMAL(10,2) DEFAULT NULL,
+  archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);

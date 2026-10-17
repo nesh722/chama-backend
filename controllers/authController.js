@@ -219,7 +219,7 @@ exports.changeEmail = async (req, res) => {
     const [users] = await db.query('SELECT password_hash FROM users WHERE id = ?', [userId]);
     const match = await bcrypt.compare(current_password, users[0].password_hash);
     if (!match) {
-      return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
     }
 
     const [existing] = await db.query('SELECT id FROM users WHERE email = ? AND id != ?', [new_email, userId]);
@@ -251,7 +251,7 @@ exports.changePassword = async (req, res) => {
     const [users] = await db.query('SELECT password_hash FROM users WHERE id = ?', [userId]);
     const match = await bcrypt.compare(current_password, users[0].password_hash);
     if (!match) {
-      return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
     }
 
     const newHash = await bcrypt.hash(new_password, 10);

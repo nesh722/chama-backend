@@ -58,19 +58,63 @@ async function buildReport(groupId, userId, role, type) {
       };
     }
 
-    case 'payouts': {
-      const query = `
-        SELECT u.full_name, pr.rotation_order, pr.has_received, pr.received_at
-        FROM payout_rotations pr
-        JOIN users u ON pr.user_id = u.id
-        WHERE pr.group_id = ? ${scoped ? '' : 'AND pr.user_id = ?'}
-        ORDER BY pr.rotation_order ASC`;
+        case 'payouts': {
       const params = scoped ? [groupId] : [groupId, userId];
-      const [rows] = await db.query(query, params);
+
+      // Current (in-progress or just-finished) rotation, with the amount paid
+      // pulled from the transactions ledger
+      const [currentRows] = await db.query(
+        `SELECT u.full_name, pr.rotation_order, pr.has_received, pr.received_at, t.amount
+         FROM payout_rotations pr
+         JOIN users u ON pr.user_id = u.id
+         LEFT JOIN transactions t ON t.type = 'payout' AND t.reference_id = pr.id
+         WHERE pr.group_id = ? ${scoped ? '' : 'AND pr.user_id = ?'}
+         ORDER BY pr.rotation_order ASC`,
+        params
+      );
+
+      // Archived past cycles
+      const [historyRows] = await db.query(
+        `SELECT h.cycle_number, u.full_name, h.rotation_order, h.has_received, h.received_at, h.amount
+         FROM payout_rotation_history h
+         JOIN users u ON h.user_id = u.id
+         WHERE h.group_id = ? ${scoped ? '' : 'AND h.user_id = ?'}
+         ORDER BY h.cycle_number DESC, h.rotation_order ASC`,
+        params
+      );
+
+      // The current cycle's number is one past the latest archived cycle. This is
+      // looked up separately so a member's filtered view still numbers it correctly.
+      const [maxRows] = await db.query(
+        'SELECT COALESCE(MAX(cycle_number), 0) AS maxCycle FROM payout_rotation_history WHERE group_id = ?',
+        [groupId]
+      );
+      const currentCycleNumber = maxRows[0].maxCycle + 1;
+
+      const fmtDate = (d) => (d ? new Date(d).toLocaleString() : '-');
+      const fmtAmount = (a) => (a != null ? a : '-');
+
       return {
         title: 'Payout Rotation History',
-        columns: ['Member', 'Order', 'Received?', 'Received At'],
-        rows: rows.map(r => [r.full_name, r.rotation_order, r.has_received ? 'Yes' : 'No', r.received_at ? new Date(r.received_at).toLocaleString() : '-'])
+        columns: ['Cycle', 'Member', 'Order', 'Received?', 'Amount', 'Received At'],
+        rows: [
+          ...currentRows.map((r) => [
+            `${currentCycleNumber} (current)`,
+            r.full_name,
+            r.rotation_order,
+            r.has_received ? 'Yes' : 'No',
+            fmtAmount(r.amount),
+            fmtDate(r.received_at)
+          ]),
+          ...historyRows.map((r) => [
+            r.cycle_number,
+            r.full_name,
+            r.rotation_order,
+            r.has_received ? 'Yes' : 'No',
+            fmtAmount(r.amount),
+            fmtDate(r.received_at)
+          ])
+        ]
       };
     }
 

@@ -26,9 +26,32 @@ exports.setupRotation = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can set up the rotation' });
     }
 
+    // Archive the current rotation (if there is one) before replacing it
+    const [existingRows] = await db.query(
+      'SELECT id FROM payout_rotations WHERE group_id = ? LIMIT 1',
+      [group_id]
+    );
+    if (existingRows.length > 0) {
+      const [cycleRows] = await db.query(
+        'SELECT COALESCE(MAX(cycle_number), 0) + 1 AS next_cycle FROM payout_rotation_history WHERE group_id = ?',
+        [group_id]
+      );
+      const nextCycle = cycleRows[0].next_cycle;
+
+      await db.query(
+        `INSERT INTO payout_rotation_history
+           (group_id, cycle_number, user_id, rotation_order, has_received, received_at, amount)
+         SELECT pr.group_id, ?, pr.user_id, pr.rotation_order, pr.has_received, pr.received_at, t.amount
+         FROM payout_rotations pr
+         LEFT JOIN transactions t ON t.type = 'payout' AND t.reference_id = pr.id
+         WHERE pr.group_id = ?`,
+        [nextCycle, group_id]
+      );
+    }
+
     // Clear any existing rotation for this group (allows re-setup)
     await db.query('DELETE FROM payout_rotations WHERE group_id = ?', [group_id]);
-
+    
     // Insert new rotation order
     for (let i = 0; i < user_order.length; i++) {
       const userId = user_order[i];
@@ -127,6 +150,33 @@ exports.markPayout = async (req, res) => {
     });
 
     res.json({ success: true, message: 'Payout marked successfully', paidToUserId: next.user_id, amount: payoutAmount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// GET PAYOUT ROTATION HISTORY FOR A GROUP (past cycles)
+exports.getRotationHistory = async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const userId = req.user.userId;
+
+    const role = await getMembership(groupId, userId);
+    if (!role) {
+      return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+    }
+
+    const [rows] = await db.query(
+      `SELECT h.id, h.cycle_number, u.full_name, h.rotation_order, h.has_received,
+              h.received_at, h.amount, h.archived_at
+       FROM payout_rotation_history h
+       JOIN users u ON h.user_id = u.id
+       WHERE h.group_id = ?
+       ORDER BY h.cycle_number DESC, h.rotation_order ASC`,
+      [groupId]
+    );
+
+    res.json({ success: true, history: rows });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
