@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const crypto = require('crypto');
 const { logActivity } = require('../utils/activityLogService');
+const { getCurrentCycleLabel } = require('../utils/cycle');
 
 // Helper: check if user is a member of a group, and get their role
 async function getMembership(groupId, userId) {
@@ -48,9 +49,9 @@ exports.createGroup = async (req, res) => {
     }
 
     const [result] = await db.query(
-      'INSERT INTO groups_table (name, description, contribution_amount, contribution_frequency, created_by) VALUES (?, ?, ?, ?, ?)',
-      [name, description || null, contribution_amount, contribution_frequency || 'monthly', userId]
-    );
+  'INSERT INTO groups_table (name, description, contribution_amount, contribution_frequency, created_by, cycle_anchor_date) VALUES (?, ?, ?, ?, ?, CURDATE())',
+  [name, description || null, contribution_amount, contribution_frequency || 'monthly', userId]
+);
 
     const groupId = result.insertId;
 
@@ -231,10 +232,16 @@ exports.getMyGroups = async (req, res) => {
   }
 };
 
-// GET SINGLE GROUP DETAILS (with member list)
+// GET SINGLE GROUP DETAILS (with member list), members only
 exports.getGroupDetails = async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
+
+    const role = await getMembership(id, userId);
+    if (!role) {
+      return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+    }
 
     const [groupRows] = await db.query('SELECT * FROM groups_table WHERE id = ?', [id]);
     if (groupRows.length === 0) {
@@ -249,7 +256,10 @@ exports.getGroupDetails = async (req, res) => {
       [id]
     );
 
-    res.json({ success: true, group: groupRows[0], members });
+    const group = groupRows[0];
+    group.current_cycle = getCurrentCycleLabel(group.contribution_frequency, group.cycle_anchor_date);
+
+    res.json({ success: true, group, members });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -275,7 +285,7 @@ exports.getMySavingsProgress = async (req, res) => {
       const targetToDate = parseFloat(group.savings_target) * cyclesElapsed;
 
       const [contribRows] = await db.query(
-        `SELECT COALESCE(SUM(amount), 0) AS total FROM contributions WHERE group_id = ? AND user_id = ? AND status = 'paid'`,
+        `SELECT COALESCE(SUM(amount), 0) AS total FROM contributions WHERE group_id = ? AND user_id = ? AND status IN ('paid', 'partial')`,
         [group.id, userId]
       );
       const [savingsRows] = await db.query(
@@ -425,7 +435,7 @@ exports.getSavingsProgress = async (req, res) => {
 
     const [members] = await db.query(
       `SELECT u.id, u.full_name,
-        COALESCE((SELECT SUM(amount) FROM contributions WHERE user_id = u.id AND group_id = gm.group_id AND status = 'paid'), 0)
+        COALESCE((SELECT SUM(amount) FROM contributions WHERE user_id = u.id AND group_id = gm.group_id AND status IN ('paid', 'partial')), 0)
         + COALESCE((SELECT SUM(amount) FROM savings_deposits WHERE user_id = u.id AND group_id = gm.group_id), 0) AS paidToDate
        FROM group_members gm
        JOIN users u ON gm.user_id = u.id

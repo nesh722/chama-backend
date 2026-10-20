@@ -16,4 +16,5 @@ router.put('/change-email', authMiddleware, authController.changeEmail);
 router.put('/change-password', authMiddleware, authController.changePassword);
 router.delete('/delete-account', authMiddleware, authController.deleteAccount);
 router.post('/push-token', authMiddleware, authController.savePushToken);
+router.delete('/push-token', authMiddleware, authController.clearPushToken);
 module.exports = router;

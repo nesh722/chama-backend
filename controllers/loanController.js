@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { logActivity } = require('../utils/activityLogService');
 const { createNotification } = require('./notificationController');
+const { notifyOverdueLoans, formatDate } = require('../utils/overdueLoans');
 
 // Helper: check membership + role
 async function getMembership(groupId, userId) {
@@ -9,28 +10,6 @@ async function getMembership(groupId, userId) {
     [groupId, userId]
   );
   return rows.length > 0 ? rows[0].role : null;
-}
-
-// Helper: check the user's own approved loans for ones that are now overdue and
-// haven't been notified yet, and notify them. Called opportunistically whenever
-// loan data is fetched -- no separate scheduler/cron job needed.
-async function checkAndNotifyOverdueLoans(userId) {
-  const [overdue] = await db.query(
-    `SELECT id, amount, due_date FROM loans
-     WHERE user_id = ? AND status = 'approved' AND due_date IS NOT NULL
-     AND due_date < CURDATE() AND overdue_notified = FALSE`,
-    [userId]
-  );
-
-  for (const loan of overdue) {
-    const dueDateLabel = new Date(loan.due_date).toISOString().split('T')[0];
-    await createNotification(
-      userId,
-      'Loan Repayment Overdue',
-      `Your loan of KES ${loan.amount} was due on ${dueDateLabel} and is now overdue. Please repay as soon as possible.`
-    );
-    await db.query('UPDATE loans SET overdue_notified = TRUE WHERE id = ?', [loan.id]);
-  }
 }
 
 // REQUEST A LOAN
@@ -77,6 +56,30 @@ exports.requestLoan = async (req, res) => {
       description: `You requested a loan of KES ${amount}, due ${due_date}`,
       amount
     });
+
+        // Tell the group's treasurer/chair there's a request waiting. Wrapped separately:
+    // the loan is already saved, so a notification hiccup shouldn't fail the request.
+    try {
+      const [approvers] = await db.query(
+        `SELECT user_id FROM group_members
+         WHERE group_id = ? AND role IN ('treasurer', 'chair') AND user_id != ?`,
+        [group_id, userId]
+      );
+      const [info] = await db.query(
+        `SELECT (SELECT full_name FROM users WHERE id = ?) AS borrower_name,
+                (SELECT name FROM groups_table WHERE id = ?) AS group_name`,
+        [userId, group_id]
+      );
+      for (const a of approvers) {
+        await createNotification(
+          a.user_id,
+          'New Loan Request',
+          `${info[0].borrower_name} requested a loan of KES ${amount} in ${info[0].group_name}. Open the Loans tab to review it.`
+        );
+      }
+    } catch (notifyErr) {
+      console.log('Loan request notification failed:', notifyErr.message);
+    }
 
     res.status(201).json({ success: true, message: 'Loan requested successfully', loanId: result.insertId });
   } catch (err) {
@@ -135,6 +138,20 @@ exports.decideLoan = async (req, res) => {
           : `Your loan request of KES ${loan.amount} was rejected`,
       amount: loan.amount
     });
+
+    try {
+      const [groupInfo] = await db.query('SELECT name FROM groups_table WHERE id = ?', [loan.group_id]);
+      const groupName = groupInfo[0]?.name || 'your group';
+      await createNotification(
+        loan.user_id,
+        decision === 'approved' ? 'Loan Approved' : 'Loan Rejected',
+        decision === 'approved'
+          ? `Your loan of KES ${loan.amount} in ${groupName} was approved. Please repay by ${loan.due_date ? formatDate(loan.due_date) : 'the agreed date'}.`
+          : `Your loan request of KES ${loan.amount} in ${groupName} was rejected.`
+      );
+    } catch (notifyErr) {
+      console.log('Loan decision notification failed:', notifyErr.message);
+    }
 
     res.json({ success: true, message: `Loan ${decision} successfully` });
   } catch (err) {
@@ -216,7 +233,7 @@ exports.getGroupLoans = async (req, res) => {
     }
 
     // Opportunistic check: if the viewer has any overdue loans of their own, notify now
-    await checkAndNotifyOverdueLoans(userId);
+    await notifyOverdueLoans(userId);
 
     const [rows] = await db.query(
       `SELECT l.id, l.user_id, u.full_name, l.amount, l.status, l.due_date, l.requested_at, l.approved_at,
@@ -239,7 +256,7 @@ exports.getMyLoans = async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    await checkAndNotifyOverdueLoans(userId);
+    await notifyOverdueLoans(userId);
 
     const [rows] = await db.query(
       `SELECT l.id, g.name AS group_name, l.amount, l.status, l.due_date, l.requested_at, l.approved_at

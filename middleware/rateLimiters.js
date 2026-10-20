@@ -51,3 +51,13 @@ exports.loginAccountLimiter = rateLimit({
     message: 'Too many login attempts for this account. Please wait 15 minutes and try again.'
   }
 });
+
+// Manual notifications: 20 per hour per signed-in user (runs after authMiddleware)
+exports.sendNotificationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: (req) => `user-${req.user.userId}`,
+  message: { success: false, message: 'You have sent too many notifications. Please try again later.' }
+});

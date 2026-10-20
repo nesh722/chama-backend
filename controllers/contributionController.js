@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { logActivity } = require('../utils/activityLogService');
-
+const { createNotification } = require('./notificationController');
+const { getCurrentCycleLabel, describeCycle } = require('../utils/cycle');
 // Helper: check if user is a member of a group, and get their role
 async function getMembership(groupId, userId) {
   const [rows] = await db.query(
@@ -9,22 +10,6 @@ async function getMembership(groupId, userId) {
   );
   return rows.length > 0 ? rows[0].role : null;
 }
-// Helper: current cycle label based on frequency
-function getCurrentCycleLabel(frequency) {
-  const now = new Date();
-  if (frequency === 'weekly') {
-    const target = new Date(now.valueOf());
-    const dayNr = (now.getUTCDay() + 6) % 7;
-    target.setUTCDate(target.getUTCDate() - dayNr + 3);
-    const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
-    const week = 1 + Math.round(((target - firstThursday) / 86400000 - 3) / 7);
-    return `${target.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
-  } else {
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    return `${year}-${month}`;
-  }
-}
 
 // LOG A CONTRIBUTION (self-report by a member, or treasurer logging on someone's behalf)
 exports.logContribution = async (req, res) => {
@@ -32,15 +17,20 @@ exports.logContribution = async (req, res) => {
     const { group_id, amount, user_id } = req.body;
     const requesterId = req.user.userId;
 
-    if (!group_id || !amount) {
-      return res.status(400).json({ success: false, message: 'group_id and amount are required' });
+    const paying = parseFloat(amount);
+    if (!group_id || !paying || paying <= 0) {
+      return res.status(400).json({ success: false, message: 'group_id and a positive amount are required' });
     }
 
-    const [groupRows] = await db.query('SELECT contribution_frequency FROM groups_table WHERE id = ?', [group_id]);
+    const [groupRows] = await db.query(
+      'SELECT contribution_amount, contribution_frequency, cycle_anchor_date FROM groups_table WHERE id = ?',
+      [group_id]
+    );
     if (groupRows.length === 0) {
       return res.status(404).json({ success: false, message: 'Group not found' });
     }
-    const cyclePeriod = getCurrentCycleLabel(groupRows[0].contribution_frequency);
+    const group = groupRows[0];
+    const cyclePeriod = getCurrentCycleLabel(group.contribution_frequency, group.cycle_anchor_date);
 
     const requesterRole = await getMembership(group_id, requesterId);
     if (!requesterRole) {
@@ -59,39 +49,56 @@ exports.logContribution = async (req, res) => {
     }
 
     const [existing] = await db.query(
-      'SELECT id FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ?',
+      'SELECT id, amount FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ?',
       [group_id, targetUserId, cyclePeriod]
     );
+
+    const target = parseFloat(group.contribution_amount);
+    const alreadyPaid = existing.length > 0 ? parseFloat(existing[0].amount) : 0;
+    const newTotal = alreadyPaid + paying;
+    const status = newTotal >= target ? 'paid' : 'partial';
+    const remaining = Math.max(target - newTotal, 0);
 
     let contributionId;
     if (existing.length > 0) {
       contributionId = existing[0].id;
       await db.query(
         'UPDATE contributions SET amount = ?, status = ?, paid_at = NOW() WHERE id = ?',
-        [amount, 'paid', contributionId]
+        [newTotal, status, contributionId]
       );
     } else {
       const [result] = await db.query(
         'INSERT INTO contributions (group_id, user_id, amount, cycle_period, status, paid_at) VALUES (?, ?, ?, ?, ?, NOW())',
-        [group_id, targetUserId, amount, cyclePeriod, 'paid']
+        [group_id, targetUserId, newTotal, cyclePeriod, status]
       );
       contributionId = result.insertId;
     }
 
+    // The ledger records each payment as it happened, not the running total
     await db.query(
       'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-      [group_id, targetUserId, 'contribution', amount, contributionId]
+      [group_id, targetUserId, 'contribution', paying, contributionId]
     );
 
     await logActivity({
       userId: targetUserId,
       groupId: group_id,
       actionType: 'logged_contribution',
-      description: `You made a contribution of KES ${amount} for ${cyclePeriod}`,
-      amount
+      description: remaining > 0
+        ? `You paid KES ${paying} toward ${cyclePeriod} (KES ${remaining} still remaining)`
+        : `You completed your KES ${target} contribution for ${cyclePeriod}`,
+      amount: paying
     });
 
-    res.status(201).json({ success: true, message: 'Contribution logged successfully', contributionId, cyclePeriod });
+    res.status(201).json({
+      success: true,
+      message: 'Contribution logged successfully',
+      contributionId,
+      cyclePeriod,
+      status,
+      paidSoFar: newTotal,
+      remaining
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -108,11 +115,11 @@ exports.getGroupContributions = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      `SELECT c.id, u.full_name, c.amount, c.cycle_period, c.status, c.paid_at
+      `SELECT c.id, c.user_id, u.full_name, c.amount, c.cycle_period, c.status, c.paid_at
        FROM contributions c
        JOIN users u ON c.user_id = u.id
        WHERE c.group_id = ?
-       ORDER BY c.cycle_period DESC, u.full_name ASC`,
+      ORDER BY c.paid_at DESC, c.id DESC`,
       [groupId]
     );
 
@@ -182,7 +189,7 @@ exports.getMyDueStatus = async (req, res) => {
     const userId = req.user.userId;
 
     const [groups] = await db.query(
-      `SELECT g.id, g.name, g.contribution_amount, g.contribution_frequency
+      `SELECT g.id, g.name, g.contribution_amount, g.contribution_frequency, g.cycle_anchor_date
        FROM group_members gm
        JOIN groups_table g ON gm.group_id = g.id
        WHERE gm.user_id = ?`,
@@ -191,12 +198,16 @@ exports.getMyDueStatus = async (req, res) => {
 
     const results = [];
     for (const group of groups) {
-      const currentCycle = getCurrentCycleLabel(group.contribution_frequency);
+      const currentCycle = getCurrentCycleLabel(group.contribution_frequency, group.cycle_anchor_date);
 
-      const [paidRows] = await db.query(
-        `SELECT id FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ? AND status = 'paid'`,
+      const [rows] = await db.query(
+        'SELECT amount, status FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ?',
         [group.id, userId, currentCycle]
       );
+      const row = rows[0];
+      const isPaid = !!row && row.status === 'paid';
+      const paidSoFar = row ? parseFloat(row.amount) : 0;
+      const remaining = isPaid ? 0 : Math.max(parseFloat(group.contribution_amount) - paidSoFar, 0);
 
       results.push({
         groupId: group.id,
@@ -204,11 +215,127 @@ exports.getMyDueStatus = async (req, res) => {
         amount: group.contribution_amount,
         frequency: group.contribution_frequency,
         currentCycle,
-        isPaid: paidRows.length > 0
+        isPaid,
+        paidSoFar,
+        remaining
       });
     }
-
     res.json({ success: true, due: results });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// SEND CONTRIBUTION REMINDER(S) (treasurer/chair only)
+// With user_id: reminds that one member. Without it: reminds everyone who hasn't paid in full.
+exports.sendContributionReminder = async (req, res) => {
+  try {
+    const { group_id, user_id } = req.body;
+    const senderId = req.user.userId;
+
+    if (!group_id) {
+      return res.status(400).json({ success: false, message: 'group_id is required' });
+    }
+
+    const senderRole = await getMembership(group_id, senderId);
+    if (senderRole !== 'treasurer' && senderRole !== 'chair') {
+      return res.status(403).json({ success: false, message: 'Only the treasurer or chair can send reminders' });
+    }
+
+    const [groupRows] = await db.query(
+      'SELECT name, contribution_amount, contribution_frequency, cycle_anchor_date FROM groups_table WHERE id = ?',
+      [group_id]
+    );
+    if (groupRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Group not found' });
+    }
+    const group = groupRows[0];
+    const cycle = getCurrentCycleLabel(group.contribution_frequency, group.cycle_anchor_date);
+    const target = parseFloat(group.contribution_amount);
+
+    // Members (other than the sender) who haven't paid in full this cycle, with what they've paid so far
+    const params = [cycle, group_id, senderId];
+    let sql = `SELECT gm.user_id, u.full_name, COALESCE(c.amount, 0) AS paid
+               FROM group_members gm
+               JOIN users u ON gm.user_id = u.id
+               LEFT JOIN contributions c
+                 ON c.group_id = gm.group_id AND c.user_id = gm.user_id AND c.cycle_period = ?
+               WHERE gm.group_id = ? AND gm.user_id != ?
+               AND (c.id IS NULL OR c.status != 'paid')`;
+    if (user_id) {
+      sql += ' AND gm.user_id = ?';
+      params.push(user_id);
+    }
+    const [owing] = await db.query(sql, params);
+
+    if (user_id && owing.length === 0) {
+      if (Number(user_id) === senderId) {
+        return res.status(400).json({ success: false, message: 'You cannot send a reminder to yourself' });
+      }
+      const targetRole = await getMembership(group_id, user_id);
+      if (!targetRole) {
+        return res.status(400).json({ success: false, message: 'That user is not a member of this group' });
+      }
+      return res.status(400).json({ success: false, message: 'That member has already paid in full for this cycle' });
+    }
+
+    let sent = 0;
+    let skipped = 0;
+
+    for (const m of owing) {
+      // Cooldown: one reminder per member per cycle every 24 hours
+      const [recent] = await db.query(
+        `SELECT id FROM contribution_reminders
+         WHERE group_id = ? AND user_id = ? AND cycle_period = ?
+         AND sent_at > DATE_SUB(NOW(), INTERVAL 24 HOUR) LIMIT 1`,
+        [group_id, m.user_id, cycle]
+      );
+      if (recent.length > 0) {
+        skipped++;
+        continue;
+      }
+
+      const remaining = Math.max(target - parseFloat(m.paid), 0);
+      try {
+        await createNotification(
+          m.user_id,
+          'Contribution Reminder',
+          `Your contribution for ${describeCycle(cycle)} in ${group.name} is still pending. KES ${remaining} remaining of KES ${target}.`
+        );
+        await db.query(
+          'INSERT INTO contribution_reminders (group_id, user_id, cycle_period, sent_by) VALUES (?, ?, ?, ?)',
+          [group_id, m.user_id, cycle, senderId]
+        );
+        sent++;
+      } catch (err) {
+        console.log(`Reminder failed for user ${m.user_id}:`, err.message);
+      }
+    }
+
+    if (sent === 0 && skipped > 0) {
+      return res.status(429).json({
+        success: false,
+        message: user_id
+          ? 'This member was already reminded in the last 24 hours'
+          : 'Everyone who owes was already reminded in the last 24 hours',
+        sent,
+        skipped
+      });
+    }
+    if (sent === 0) {
+      return res.json({ success: true, sent: 0, skipped, message: 'Everyone has paid in full for this cycle' });
+    }
+
+    await logActivity({
+      userId: senderId,
+      groupId: group_id,
+      actionType: 'sent_reminder',
+      description: user_id
+        ? `You sent a contribution reminder to ${owing[0].full_name}`
+        : `You sent contribution reminders to ${sent} member${sent === 1 ? '' : 's'}`
+    });
+
+    res.json({ success: true, sent, skipped, message: 'Reminder sent' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

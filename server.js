@@ -11,6 +11,9 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const savingsRoutes = require('./routes/savingsRoutes');
 const reportRoutes = require('./routes/reportRoutes');
+const cron = require('node-cron');
+const { notifyOverdueLoans } = require('./utils/overdueLoans');
+const { announceNewCycles } = require('./utils/cycleAnnouncements');
 
 const app = express();
 app.use(cors());
@@ -46,4 +49,12 @@ app.use('/api/savings', savingsRoutes);
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+
+  const runDailyJobs = async () => {
+    try { await notifyOverdueLoans(); } catch (err) { console.log('Overdue loan check failed:', err.message); }
+    try { await announceNewCycles(); } catch (err) { console.log('Cycle announcement failed:', err.message); }
+  };
+
+  cron.schedule('0 9 * * *', runDailyJobs, { timezone: 'Africa/Nairobi' }); // daily at 9:00
+  runDailyJobs(); // catch up on anything missed while the server was off
 });

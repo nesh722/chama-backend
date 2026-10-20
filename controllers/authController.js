@@ -343,8 +343,19 @@ exports.savePushToken = async (req, res) => {
       return res.status(400).json({ success: false, message: 'push_token is required' });
     }
 
-    await db.query('UPDATE users SET push_token = ? WHERE id = ?', [push_token, userId]);
+   await db.query('UPDATE users SET push_token = NULL WHERE push_token = ? AND id != ?', [push_token, userId]);
+await db.query('UPDATE users SET push_token = ? WHERE id = ?', [push_token, userId]);
     res.json({ success: true, message: 'Push token saved' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// CLEAR THIS USER'S PUSH TOKEN (called on logout)
+exports.clearPushToken = async (req, res) => {
+  try {
+    await db.query('UPDATE users SET push_token = NULL WHERE id = ?', [req.user.userId]);
+    res.json({ success: true, message: 'Push token cleared' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

@@ -37,7 +37,7 @@ async function buildReport(groupId, userId, role, type) {
         FROM contributions c
         JOIN users u ON c.user_id = u.id
         WHERE c.group_id = ? ${scoped ? '' : 'AND c.user_id = ?'}
-        ORDER BY c.cycle_period DESC, u.full_name ASC`;
+        ORDER BY c.paid_at DESC, u.full_name ASC`;
       const params = scoped ? [groupId] : [groupId, userId];
       const [rows] = await db.query(query, params);
       return {
@@ -146,7 +146,7 @@ async function buildReport(groupId, userId, role, type) {
 
         const [currentMembers] = await db.query(
           `SELECT u.id, u.full_name,
-            COALESCE((SELECT SUM(amount) FROM contributions WHERE user_id = u.id AND group_id = gm.group_id AND status = 'paid'), 0)
+            COALESCE((SELECT SUM(amount) FROM contributions WHERE user_id = u.id AND group_id = gm.group_id AND status IN ('paid', 'partial')), 0)
             + COALESCE((SELECT SUM(amount) FROM savings_deposits WHERE user_id = u.id AND group_id = gm.group_id), 0) AS paidToDate
            FROM group_members gm
            JOIN users u ON gm.user_id = u.id
@@ -184,7 +184,7 @@ async function buildReport(groupId, userId, role, type) {
         const [periodMembers] = await db.query(
           `SELECT u.id, u.full_name,
             COALESCE((SELECT SUM(amount) FROM contributions
-                      WHERE user_id = u.id AND group_id = gm.group_id AND status = 'paid'
+                      WHERE user_id = u.id AND group_id = gm.group_id AND status IN ('paid', 'partial')
                         AND paid_at >= ? AND paid_at < DATE_ADD(?, INTERVAL 1 DAY)), 0)
             + COALESCE((SELECT SUM(amount) FROM savings_deposits
                         WHERE user_id = u.id AND group_id = gm.group_id

@@ -151,3 +151,22 @@ CREATE TABLE payout_rotation_history (
   FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+ALTER TABLE loans
+  ADD COLUMN last_reminded_at DATETIME DEFAULT NULL,
+  ADD COLUMN reminder_count INT NOT NULL DEFAULT 0;
+
+  ALTER TABLE groups_table ADD COLUMN last_cycle_announced VARCHAR(10) DEFAULT NULL;
+  
+  CREATE TABLE contribution_reminders (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  user_id INT NOT NULL,
+  cycle_period VARCHAR(20) NOT NULL,
+  sent_by INT NULL,
+  sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_reminder_lookup (group_id, user_id, cycle_period, sent_at),
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (sent_by) REFERENCES users(id) ON DELETE SET NULL
+);
