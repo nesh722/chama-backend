@@ -2,6 +2,7 @@ const db = require('../config/db');
 const { logActivity } = require('../utils/activityLogService');
 const { createNotification } = require('./notificationController');
 const { getCurrentCycleLabel, describeCycle } = require('../utils/cycle');
+const { claimKey, saveResponse, releaseKey } = require('../utils/idempotency');
 // Helper: check if user is a member of a group, and get their role
 async function getMembership(groupId, userId) {
   const [rows] = await db.query(
@@ -14,12 +15,18 @@ async function getMembership(groupId, userId) {
 // LOG A CONTRIBUTION (self-report by a member, or treasurer logging on someone's behalf)
 exports.logContribution = async (req, res) => {
   try {
-    const { group_id, amount, user_id } = req.body;
+    const { group_id, amount, user_id, idempotency_key } = req.body;
     const requesterId = req.user.userId;
 
     const paying = parseFloat(amount);
     if (!group_id || !paying || paying <= 0) {
       return res.status(400).json({ success: false, message: 'group_id and a positive amount are required' });
+    }
+    if (
+      idempotency_key !== undefined &&
+      (typeof idempotency_key !== 'string' || idempotency_key.length < 8 || idempotency_key.length > 64)
+    ) {
+      return res.status(400).json({ success: false, message: 'Invalid idempotency_key' });
     }
 
     const [groupRows] = await db.query(
@@ -48,57 +55,101 @@ exports.logContribution = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Target user is not a member of this group' });
     }
 
-    const [existing] = await db.query(
-      'SELECT id, amount FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ?',
-      [group_id, targetUserId, cyclePeriod]
-    );
-
-    const target = parseFloat(group.contribution_amount);
-    const alreadyPaid = existing.length > 0 ? parseFloat(existing[0].amount) : 0;
-    const newTotal = alreadyPaid + paying;
-    const status = newTotal >= target ? 'paid' : 'partial';
-    const remaining = Math.max(target - newTotal, 0);
-
-    let contributionId;
-    if (existing.length > 0) {
-      contributionId = existing[0].id;
-      await db.query(
-        'UPDATE contributions SET amount = ?, status = ?, paid_at = NOW() WHERE id = ?',
-        [newTotal, status, contributionId]
-      );
-    } else {
-      const [result] = await db.query(
-        'INSERT INTO contributions (group_id, user_id, amount, cycle_period, status, paid_at) VALUES (?, ?, ?, ?, ?, NOW())',
-        [group_id, targetUserId, newTotal, cyclePeriod, status]
-      );
-      contributionId = result.insertId;
+    // Validation is done, so claim the key. A retry of a payment that already went through
+    // gets the saved result back instead of being added a second time.
+    let keyClaimed = false;
+    if (idempotency_key) {
+      const claim = await claimKey(idempotency_key, requesterId, 'log_contribution');
+      if (claim.status === 'done') {
+        return res.status(200).json({ ...claim.response, duplicate: true });
+      }
+      if (claim.status === 'in_progress') {
+        return res.status(409).json({ success: false, message: 'This payment is already being processed. Please wait a moment.' });
+      }
+      keyClaimed = true;
     }
 
-    // The ledger records each payment as it happened, not the running total
-    await db.query(
-      'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-      [group_id, targetUserId, 'contribution', paying, contributionId]
-    );
+    const target = parseFloat(group.contribution_amount);
+    let payload;
 
-    await logActivity({
-      userId: targetUserId,
-      groupId: group_id,
-      actionType: 'logged_contribution',
-      description: remaining > 0
-        ? `You paid KES ${paying} toward ${cyclePeriod} (KES ${remaining} still remaining)`
-        : `You completed your KES ${target} contribution for ${cyclePeriod}`,
-      amount: paying
-    });
+    // The contribution row and the ledger entry are saved together or not at all
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    res.status(201).json({
-      success: true,
-      message: 'Contribution logged successfully',
-      contributionId,
-      cyclePeriod,
-      status,
-      paidSoFar: newTotal,
-      remaining
-    });
+      const [existing] = await conn.query(
+        'SELECT id, amount FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ? FOR UPDATE',
+        [group_id, targetUserId, cyclePeriod]
+      );
+
+      const alreadyPaid = existing.length > 0 ? parseFloat(existing[0].amount) : 0;
+      const newTotal = alreadyPaid + paying;
+      const status = newTotal >= target ? 'paid' : 'partial';
+      const remaining = Math.max(target - newTotal, 0);
+
+      let contributionId;
+      if (existing.length > 0) {
+        contributionId = existing[0].id;
+        await conn.query(
+          'UPDATE contributions SET amount = ?, status = ?, paid_at = NOW() WHERE id = ?',
+          [newTotal, status, contributionId]
+        );
+      } else {
+        const [result] = await conn.query(
+          'INSERT INTO contributions (group_id, user_id, amount, cycle_period, status, paid_at) VALUES (?, ?, ?, ?, ?, NOW())',
+          [group_id, targetUserId, newTotal, cyclePeriod, status]
+        );
+        contributionId = result.insertId;
+      }
+
+      await conn.query(
+        'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
+        [group_id, targetUserId, 'contribution', paying, contributionId]
+      );
+
+      await conn.commit();
+
+      payload = {
+        success: true,
+        message: 'Contribution logged successfully',
+        contributionId,
+        cyclePeriod,
+        status,
+        paidSoFar: newTotal,
+        remaining
+      };
+    } catch (writeErr) {
+      await conn.rollback();
+      if (keyClaimed) await releaseKey(idempotency_key, requesterId);
+      throw writeErr;
+    } finally {
+      conn.release();
+    }
+
+    // The payment is committed. Everything below is best-effort and must never undo or re-run it.
+    try {
+      await logActivity({
+        userId: targetUserId,
+        groupId: group_id,
+        actionType: 'logged_contribution',
+        description: payload.remaining > 0
+          ? `You paid KES ${paying} toward ${cyclePeriod} (KES ${payload.remaining} still remaining)`
+          : `You completed your KES ${target} contribution for ${cyclePeriod}`,
+        amount: paying
+      });
+    } catch (logErr) {
+      console.log('Activity log failed:', logErr.message);
+    }
+
+    if (keyClaimed) {
+      try {
+        await saveResponse(idempotency_key, requesterId, payload);
+      } catch (saveErr) {
+        console.log('Saving idempotency response failed:', saveErr.message);
+      }
+    }
+
+    return res.status(201).json(payload);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

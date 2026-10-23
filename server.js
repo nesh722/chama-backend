@@ -53,6 +53,7 @@ app.listen(PORT, () => {
   const runDailyJobs = async () => {
     try { await notifyOverdueLoans(); } catch (err) { console.log('Overdue loan check failed:', err.message); }
     try { await announceNewCycles(); } catch (err) { console.log('Cycle announcement failed:', err.message); }
+    try { await db.query('DELETE FROM request_keys WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)'); } catch (err) { console.log('Key cleanup failed:', err.message); }
   };
 
   cron.schedule('0 9 * * *', runDailyJobs, { timezone: 'Africa/Nairobi' }); // daily at 9:00

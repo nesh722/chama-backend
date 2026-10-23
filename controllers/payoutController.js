@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { logActivity } = require('../utils/activityLogService');
+const { runOnce, RequestError, validKey } = require('../utils/idempotency');
 
 // Helper: check membership + role
 async function getMembership(groupId, userId) {
@@ -100,11 +101,14 @@ exports.getRotationStatus = async (req, res) => {
 // MARK NEXT PERSON AS PAID OUT (treasurer/chair only)
 exports.markPayout = async (req, res) => {
   try {
-    const { group_id } = req.body;
+    const { group_id, idempotency_key } = req.body;
     const requesterId = req.user.userId;
 
     if (!group_id) {
       return res.status(400).json({ success: false, message: 'group_id is required' });
+    }
+    if (!validKey(idempotency_key)) {
+      return res.status(400).json({ success: false, message: 'Invalid idempotency_key' });
     }
 
     const role = await getMembership(group_id, requesterId);
@@ -112,49 +116,69 @@ exports.markPayout = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can mark a payout' });
     }
 
-    // Find the next person in rotation who hasn't received yet
-    const [nextRows] = await db.query(
-      `SELECT * FROM payout_rotations
-       WHERE group_id = ? AND has_received = FALSE
-       ORDER BY rotation_order ASC LIMIT 1`,
-      [group_id]
+    const { replayed, payload } = await runOnce(
+      { key: idempotency_key, userId: requesterId, endpoint: 'mark_payout' },
+      async (conn) => {
+        // Lock the next unpaid turn so two requests can't both take it
+        const [nextRows] = await conn.query(
+          `SELECT id, user_id FROM payout_rotations
+           WHERE group_id = ? AND has_received = FALSE
+           ORDER BY rotation_order ASC LIMIT 1 FOR UPDATE`,
+          [group_id]
+        );
+        if (nextRows.length === 0) {
+          throw new RequestError(409, 'All members have already received their payout for this rotation cycle');
+        }
+        const next = nextRows[0];
+
+        const [groupRows] = await conn.query('SELECT contribution_amount FROM groups_table WHERE id = ?', [group_id]);
+        const [countRows] = await conn.query('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?', [group_id]);
+        const payoutAmount = parseFloat(groupRows[0].contribution_amount) * countRows[0].count;
+
+        const [updated] = await conn.query(
+          'UPDATE payout_rotations SET has_received = TRUE, received_at = NOW() WHERE id = ? AND has_received = FALSE',
+          [next.id]
+        );
+        if (updated.affectedRows === 0) {
+          throw new RequestError(409, 'That payout was just recorded. Please refresh.');
+        }
+
+        await conn.query(
+          'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
+          [group_id, next.user_id, 'payout', payoutAmount, next.id]
+        );
+
+        return {
+          success: true,
+          message: 'Payout marked successfully',
+          paidToUserId: next.user_id,
+          amount: payoutAmount
+        };
+      }
     );
 
-    if (nextRows.length === 0) {
-      return res.status(409).json({ success: false, message: 'All members have already received their payout for this rotation cycle' });
+    if (replayed) return res.status(200).json({ ...payload, duplicate: true });
+
+    try {
+      await logActivity({
+        userId: payload.paidToUserId,
+        groupId: group_id,
+        actionType: 'payout_received',
+        description: `You received a payout of KES ${payload.amount}`,
+        amount: payload.amount
+      });
+    } catch (logErr) {
+      console.log('Activity log failed:', logErr.message);
     }
 
-    const next = nextRows[0];
-
-    // Get the group's contribution amount and member count to calculate payout total
-    const [groupRows] = await db.query('SELECT contribution_amount FROM groups_table WHERE id = ?', [group_id]);
-    const [memberCountRows] = await db.query('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?', [group_id]);
-    const payoutAmount = parseFloat(groupRows[0].contribution_amount) * memberCountRows[0].count;
-
-    await db.query(
-      'UPDATE payout_rotations SET has_received = TRUE, received_at = NOW() WHERE id = ?',
-      [next.id]
-    );
-
-    await db.query(
-      'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-      [group_id, next.user_id, 'payout', payoutAmount, next.id]
-    );
-
-    await logActivity({
-      userId: next.user_id,
-      groupId: group_id,
-      actionType: 'payout_received',
-      description: `You received a payout of KES ${payoutAmount}`,
-      amount: payoutAmount
-    });
-
-    res.json({ success: true, message: 'Payout marked successfully', paidToUserId: next.user_id, amount: payoutAmount });
+    res.json(payload);
   } catch (err) {
+    if (err instanceof RequestError) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 // GET PAYOUT ROTATION HISTORY FOR A GROUP (past cycles)
 exports.getRotationHistory = async (req, res) => {
   try {

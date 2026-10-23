@@ -170,3 +170,14 @@ ALTER TABLE loans
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY (sent_by) REFERENCES users(id) ON DELETE SET NULL
 );
+
+CREATE TABLE request_keys (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  idempotency_key VARCHAR(64) NOT NULL,
+  user_id INT NOT NULL,
+  endpoint VARCHAR(40) NOT NULL,
+  response_json TEXT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_request_key (idempotency_key, user_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);

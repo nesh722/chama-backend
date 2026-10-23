@@ -2,6 +2,7 @@ const db = require('../config/db');
 const { logActivity } = require('../utils/activityLogService');
 const { createNotification } = require('./notificationController');
 const { notifyOverdueLoans, formatDate } = require('../utils/overdueLoans');
+const { runOnce, RequestError, validKey } = require('../utils/idempotency');
 
 // Helper: check membership + role
 async function getMembership(groupId, userId) {
@@ -163,11 +164,15 @@ exports.decideLoan = async (req, res) => {
 exports.recordRepayment = async (req, res) => {
   try {
     const { loanId } = req.params;
-    const { amount_paid } = req.body;
+    const { amount_paid, idempotency_key } = req.body;
     const userId = req.user.userId;
+    const paying = Math.round(parseFloat(amount_paid) * 100) / 100;
 
-    if (!amount_paid) {
-      return res.status(400).json({ success: false, message: 'amount_paid is required' });
+    if (!paying || paying <= 0) {
+      return res.status(400).json({ success: false, message: 'A positive amount_paid is required' });
+    }
+    if (!validKey(idempotency_key)) {
+      return res.status(400).json({ success: false, message: 'Invalid idempotency_key' });
     }
 
     const [loanRows] = await db.query('SELECT * FROM loans WHERE id = ?', [loanId]);
@@ -176,51 +181,81 @@ exports.recordRepayment = async (req, res) => {
     }
     const loan = loanRows[0];
 
-    if (loan.status !== 'approved' && loan.status !== 'repaid') {
-      return res.status(409).json({ success: false, message: 'Loan must be approved before recording repayments' });
-    }
-
     // Only the borrower or treasurer/chair can record a repayment
     const role = await getMembership(loan.group_id, userId);
     if (userId !== loan.user_id && role !== 'treasurer' && role !== 'chair') {
       return res.status(403).json({ success: false, message: 'Not authorized to record this repayment' });
     }
 
-    await db.query(
-      'INSERT INTO loan_repayments (loan_id, amount_paid) VALUES (?, ?)',
-      [loanId, amount_paid]
+    // The loan's status is checked inside the transaction, after the idempotency check,
+    // so a retry of a repayment that completed the loan is answered as a duplicate, not an error
+    const { replayed, payload } = await runOnce(
+      { key: idempotency_key, userId, endpoint: 'record_repayment' },
+      async (conn) => {
+        const [locked] = await conn.query('SELECT amount, status FROM loans WHERE id = ? FOR UPDATE', [loanId]);
+        if (locked[0].status !== 'approved') {
+          throw new RequestError(409, 'Only an approved, unpaid loan can receive repayments');
+        }
+
+        const [sumRows] = await conn.query(
+          'SELECT COALESCE(SUM(amount_paid), 0) AS total FROM loan_repayments WHERE loan_id = ?',
+          [loanId]
+        );
+        const loanAmount = parseFloat(locked[0].amount);
+        const alreadyRepaid = parseFloat(sumRows[0].total);
+        const outstanding = Math.round((loanAmount - alreadyRepaid) * 100) / 100;
+
+        if (paying > outstanding) {
+          throw new RequestError(400, `That is more than the outstanding balance of KES ${outstanding}`);
+        }
+
+        await conn.query('INSERT INTO loan_repayments (loan_id, amount_paid) VALUES (?, ?)', [loanId, paying]);
+        await conn.query(
+          'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
+          [loan.group_id, loan.user_id, 'loan_repayment', paying, loanId]
+        );
+
+        const remaining = Math.round((outstanding - paying) * 100) / 100;
+        const loanRepaid = remaining === 0;
+        if (loanRepaid) {
+          await conn.query('UPDATE loans SET status = ? WHERE id = ?', ['repaid', loanId]);
+        }
+
+        return {
+          success: true,
+          message: 'Repayment recorded',
+          totalPaid: alreadyRepaid + paying,
+          loanAmount,
+          remaining,
+          loanRepaid
+        };
+      }
     );
 
-    await db.query(
-      'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-      [loan.group_id, loan.user_id, 'loan_repayment', amount_paid, loanId]
-    );
+    if (replayed) return res.status(200).json({ ...payload, duplicate: true });
 
-    await logActivity({
-      userId: loan.user_id,
-      groupId: loan.group_id,
-      actionType: 'loan_repayment',
-      description: `You repaid KES ${amount_paid} on your loan`,
-      amount: amount_paid
-    });
-
-    // Check if total repayments now cover the loan amount -> mark as repaid
-    const [totalRows] = await db.query(
-      'SELECT SUM(amount_paid) AS total FROM loan_repayments WHERE loan_id = ?',
-      [loanId]
-    );
-    const totalPaid = parseFloat(totalRows[0].total) || 0;
-
-    if (totalPaid >= parseFloat(loan.amount) && loan.status !== 'repaid') {
-      await db.query('UPDATE loans SET status = ? WHERE id = ?', ['repaid', loanId]);
+    try {
+      await logActivity({
+        userId: loan.user_id,
+        groupId: loan.group_id,
+        actionType: 'loan_repayment',
+        description: payload.loanRepaid
+          ? `You repaid KES ${paying} and cleared your loan`
+          : `You repaid KES ${paying} on your loan (KES ${payload.remaining} left)`,
+        amount: paying
+      });
+    } catch (logErr) {
+      console.log('Activity log failed:', logErr.message);
     }
 
-    res.status(201).json({ success: true, message: 'Repayment recorded', totalPaid, loanAmount: loan.amount });
+    res.status(201).json(payload);
   } catch (err) {
+    if (err instanceof RequestError) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 // GET ALL LOANS FOR A GROUP
 exports.getGroupLoans = async (req, res) => {
   try {
