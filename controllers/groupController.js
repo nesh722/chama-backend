@@ -420,6 +420,8 @@ exports.getSavingsProgress = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You are not a member of this group' });
     }
 
+    const isApprover = role === 'treasurer' || role === 'chair';
+
     const [groupRows] = await db.query(
       'SELECT savings_target, target_start_date, contribution_frequency FROM groups_table WHERE id = ?',
       [id]
@@ -441,7 +443,7 @@ exports.getSavingsProgress = async (req, res) => {
        JOIN users u ON gm.user_id = u.id
        WHERE gm.group_id = ?
        GROUP BY u.id, u.full_name`,
-      [id]
+      isApprover ? [id] : [id, userId]
     );
 
     const progress = members.map((m) => {

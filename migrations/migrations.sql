@@ -181,3 +181,5 @@ CREATE TABLE request_keys (
   UNIQUE KEY uq_request_key (idempotency_key, user_id),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+ALTER TABLE groups_table ADD COLUMN last_due_soon_cycle VARCHAR(20) DEFAULT NULL;

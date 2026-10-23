@@ -257,6 +257,8 @@ exports.recordRepayment = async (req, res) => {
   }
 };
 // GET ALL LOANS FOR A GROUP
+// GET LOANS FOR A GROUP
+// Treasurer/chair see every member's loans; regular members see only their own.
 exports.getGroupLoans = async (req, res) => {
   try {
     const { groupId } = req.params;
@@ -270,14 +272,16 @@ exports.getGroupLoans = async (req, res) => {
     // Opportunistic check: if the viewer has any overdue loans of their own, notify now
     await notifyOverdueLoans(userId);
 
+    const isApprover = role === 'treasurer' || role === 'chair';
+
     const [rows] = await db.query(
       `SELECT l.id, l.user_id, u.full_name, l.amount, l.status, l.due_date, l.requested_at, l.approved_at,
         COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS totalRepaid
- FROM loans l
- JOIN users u ON l.user_id = u.id
- WHERE l.group_id = ?
- ORDER BY l.requested_at DESC`,
-      [groupId]
+       FROM loans l
+       JOIN users u ON l.user_id = u.id
+       WHERE l.group_id = ? ${isApprover ? '' : 'AND l.user_id = ?'}
+       ORDER BY l.requested_at DESC`,
+      isApprover ? [groupId] : [groupId, userId]
     );
 
     res.json({ success: true, loans: rows });
