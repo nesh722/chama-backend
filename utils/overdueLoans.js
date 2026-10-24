@@ -1,8 +1,11 @@
 const db = require('../config/db');
 const { createNotification } = require('../controllers/notificationController');
+const { accrueLoanInterest } = require('./loanInterest');
 
 const REMINDER_INTERVAL_DAYS = 3; // days between reminders
 const MAX_REMINDERS = 5;          // stop after this many reminders per loan
+
+const round2 = (n) => Math.round(n * 100) / 100;
 
 function formatDate(value) {
   const d = new Date(value);
@@ -17,11 +20,22 @@ function daysOverdue(dueDate) {
   return Math.max(Math.round((today - due) / 86400000), 1);
 }
 
+function interestNote(loan, owed) {
+  const rate = parseFloat(loan.interest_rate);
+  if (!(rate > 0)) return ' Please repay as soon as possible.';
+  const per = loan.interest_period === 'weekly' ? 'week' : 'month';
+  const grace = parseInt(loan.interest_grace_days, 10) || 0;
+  return ` Late interest of ${rate}% per ${per} applies${grace > 0 ? ` after ${grace} grace day${grace === 1 ? '' : 's'}` : ''}. You currently owe KES ${owed}.`;
+}
+
 // First alert: tells the borrower AND the group's treasurer/chair that a loan just went overdue.
 async function announceNewlyOverdue(userId = null) {
   const params = [];
   let sql = `SELECT l.id, l.user_id, l.group_id, l.amount, l.due_date,
-                    u.full_name AS borrower_name, g.name AS group_name
+                    l.interest_rate, l.interest_period, l.interest_grace_days,
+                    u.full_name AS borrower_name, g.name AS group_name,
+                    COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS repaid,
+                    COALESCE((SELECT SUM(amount) FROM loan_interest_charges WHERE loan_id = l.id), 0) AS interestCharged
              FROM loans l
              JOIN users u ON l.user_id = u.id
              JOIN groups_table g ON l.group_id = g.id
@@ -45,12 +59,13 @@ async function announceNewlyOverdue(userId = null) {
     if (claim.affectedRows === 0) continue;
 
     const dueLabel = formatDate(loan.due_date);
+    const owed = Math.max(round2(parseFloat(loan.amount) + parseFloat(loan.interestCharged) - parseFloat(loan.repaid)), 0);
 
     try {
       await createNotification(
         loan.user_id,
         'Loan Repayment Overdue',
-        `Your loan of KES ${loan.amount} was due on ${dueLabel} and is now overdue. Please repay as soon as possible.`
+        `Your loan of KES ${loan.amount} was due on ${dueLabel} and is now overdue.${interestNote(loan, owed)}`
       );
     } catch (err) {
       await db.query(
@@ -86,7 +101,8 @@ async function sendOverdueReminders(userId = null) {
   const params = [MAX_REMINDERS, REMINDER_INTERVAL_DAYS];
   let sql = `SELECT l.id, l.user_id, l.amount, l.due_date, l.last_reminded_at, l.reminder_count,
                     g.name AS group_name,
-                    COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS repaid
+                    COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS repaid,
+                    COALESCE((SELECT SUM(amount) FROM loan_interest_charges WHERE loan_id = l.id), 0) AS interestCharged
              FROM loans l
              JOIN groups_table g ON l.group_id = g.id
              WHERE l.status = 'approved' AND l.due_date IS NOT NULL
@@ -110,7 +126,8 @@ async function sendOverdueReminders(userId = null) {
     );
     if (claim.affectedRows === 0) continue;
 
-    const outstanding = Math.max(parseFloat(loan.amount) - parseFloat(loan.repaid), 0);
+    const interestCharged = parseFloat(loan.interestCharged);
+    const owed = Math.max(round2(parseFloat(loan.amount) + interestCharged - parseFloat(loan.repaid)), 0);
     const days = daysOverdue(loan.due_date);
     const isFinal = loan.reminder_count + 1 >= MAX_REMINDERS;
 
@@ -119,11 +136,10 @@ async function sendOverdueReminders(userId = null) {
         loan.user_id,
         isFinal ? 'Final Loan Reminder' : 'Loan Repayment Reminder',
         `Your loan in ${loan.group_name} is ${days} day${days === 1 ? '' : 's'} overdue. ` +
-        `KES ${outstanding} is still outstanding.` +
+        `KES ${owed} is still outstanding${interestCharged > 0 ? ', including late interest' : ''}.` +
         (isFinal ? ' This is the final reminder.' : ' Please repay as soon as possible.')
       );
     } catch (err) {
-      // Restore the previous values so the next run tries again
       await db.query(
         'UPDATE loans SET last_reminded_at = ?, reminder_count = ? WHERE id = ?',
         [loan.last_reminded_at, loan.reminder_count, loan.id]
@@ -134,6 +150,7 @@ async function sendOverdueReminders(userId = null) {
 }
 
 async function notifyOverdueLoans(userId = null) {
+  await accrueLoanInterest({ userId }); // post any interest that is due first, so the messages below are accurate
   await announceNewlyOverdue(userId);
   await sendOverdueReminders(userId);
 }

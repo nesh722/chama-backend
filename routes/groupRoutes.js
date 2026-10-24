@@ -23,5 +23,6 @@ router.patch('/:id/change-role', authMiddleware, groupController.changeRole);
 router.post('/:id/remove-member', authMiddleware, groupController.removeMember);
 router.delete('/:id', authMiddleware, groupController.deleteGroup);
 router.patch('/:id/update', authMiddleware, groupController.updateGroup);
+router.put('/:id/loan-interest', authMiddleware, groupController.updateLoanInterestSettings);
 
 module.exports = router;

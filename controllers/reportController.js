@@ -13,6 +13,23 @@ function isApprover(role) {
   return role === 'treasurer' || role === 'chair';
 }
 
+// Turns a chama name into something safe for a file name: 'Chama cha Mapinduzi!' -> 'Chama-cha-Mapinduzi'
+function slugify(text) {
+  return (
+    String(text)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'chama'
+  );
+}
+
+function todayStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // Cycles between two dates (same logic as the live progress calculation, but
 // measured up to an end date instead of "now")
 function cyclesBetween(startDate, endDate, frequency) {
@@ -50,7 +67,8 @@ async function buildReport(groupId, userId, role, type) {
     case 'loans': {
       const query = `
         SELECT l.id, u.full_name, l.amount, l.status, l.due_date, l.requested_at,
-          COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS totalRepaid
+          COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS totalRepaid,
+          COALESCE((SELECT SUM(amount) FROM loan_interest_charges WHERE loan_id = l.id), 0) AS interestCharged
         FROM loans l
         JOIN users u ON l.user_id = u.id
         WHERE l.group_id = ? ${scoped ? '' : 'AND l.user_id = ?'}
@@ -59,17 +77,24 @@ async function buildReport(groupId, userId, role, type) {
       const [rows] = await db.query(query, params);
       return {
         title: 'Loan Activity',
-        columns: ['Member', 'Amount', 'Status', 'Due Date', 'Requested', 'Repaid So Far'],
-        rows: rows.map(r => [
-          r.full_name, r.amount, r.status,
-          r.due_date ? new Date(r.due_date).toLocaleDateString() : '-',
-          new Date(r.requested_at).toLocaleString(),
-          r.totalRepaid
-        ])
+        columns: ['Member', 'Amount', 'Status', 'Due Date', 'Requested', 'Late Interest', 'Repaid So Far', 'Outstanding'],
+        rows: rows.map((r) => {
+          const owed = Math.round((parseFloat(r.amount) + parseFloat(r.interestCharged) - parseFloat(r.totalRepaid)) * 100) / 100;
+          return [
+            r.full_name,
+            r.amount,
+            r.status,
+            r.due_date ? new Date(r.due_date).toLocaleDateString() : '-',
+            new Date(r.requested_at).toLocaleDateString(),
+            r.interestCharged,
+            r.totalRepaid,
+            r.status === 'approved' ? Math.max(owed, 0) : r.status === 'repaid' ? 0 : '-'
+          ];
+        })
       };
     }
 
-        case 'payouts': {
+    case 'payouts': {
       const params = scoped ? [groupId] : [groupId, userId];
 
       // Current (in-progress or just-finished) rotation, with the amount paid
@@ -129,7 +154,7 @@ async function buildReport(groupId, userId, role, type) {
       };
     }
 
-       case 'savings_target': {
+    case 'savings_target': {
       const [groupRows] = await db.query(
         'SELECT savings_target, target_start_date, contribution_frequency FROM groups_table WHERE id = ?',
         [groupId]
@@ -280,14 +305,22 @@ exports.exportReport = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Unknown report type' });
     }
 
-    const filename = `${type}-report-${groupId}.${format}`;
+    const [groupRows] = await db.query('SELECT name FROM groups_table WHERE id = ?', [groupId]);
+    const groupName = groupRows[0]?.name || 'Chama';
+    const filename = `${slugify(groupName)}_${type.replace(/_/g, '-')}_${todayStamp()}.${format}`;
 
     if (format === 'csv') {
       const escape = (val) => {
         const s = String(val ?? '');
         return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
       };
-      const lines = [report.columns.map(escape).join(',')];
+      const lines = [
+        ['Chama', groupName].map(escape).join(','),
+        ['Report', report.title].map(escape).join(','),
+        ['Generated', new Date().toLocaleString()].map(escape).join(','),
+        '',
+        report.columns.map(escape).join(',')
+      ];
       for (const row of report.rows) {
         lines.push(row.map(escape).join(','));
       }
@@ -302,10 +335,16 @@ exports.exportReport = async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const doc = new PDFDocument({
+      margin: 40,
+      size: 'A4',
+      info: { Title: `${groupName} - ${report.title}`, Author: 'Chama App' }
+    });
     doc.pipe(res);
 
-    doc.fontSize(18).text(report.title, { align: 'left' });
+    doc.font('Helvetica-Bold').fontSize(20).text(groupName, { align: 'left' });
+    doc.moveDown(0.2);
+    doc.font('Helvetica').fontSize(14).text(report.title, { align: 'left' });
     doc.moveDown(0.3);
     doc.fontSize(10).fillColor('gray').text(`Generated ${new Date().toLocaleString()}`);
     doc.moveDown(1);

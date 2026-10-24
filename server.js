@@ -15,11 +15,13 @@ const cron = require('node-cron');
 const { notifyOverdueLoans } = require('./utils/overdueLoans');
 const { announceNewCycles } = require('./utils/cycleAnnouncements');
 const { sendDueSoonReminders } = require('./utils/dueSoonReminders');
+const webRoutes = require('./routes/webRoutes');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
+app.use('/', webRoutes);
 app.use('/api/reports', reportRoutes);
 
 // Test route

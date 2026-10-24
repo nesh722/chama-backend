@@ -183,3 +183,36 @@ CREATE TABLE request_keys (
 );
 
 ALTER TABLE groups_table ADD COLUMN last_due_soon_cycle VARCHAR(20) DEFAULT NULL;
+
+ALTER TABLE groups_table
+  ADD COLUMN late_interest_rate DECIMAL(5,2) NOT NULL DEFAULT 0,
+  ADD COLUMN late_interest_period ENUM('weekly','monthly') NOT NULL DEFAULT 'monthly',
+  ADD COLUMN late_interest_grace_days INT NOT NULL DEFAULT 0,
+  ADD COLUMN late_interest_cap_percent DECIMAL(5,2) NOT NULL DEFAULT 50;
+
+ALTER TABLE loans
+  ADD COLUMN interest_rate DECIMAL(5,2) NOT NULL DEFAULT 0,
+  ADD COLUMN interest_period ENUM('weekly','monthly') NOT NULL DEFAULT 'monthly',
+  ADD COLUMN interest_grace_days INT NOT NULL DEFAULT 0,
+  ADD COLUMN interest_cap_percent DECIMAL(5,2) NOT NULL DEFAULT 50;
+
+ALTER TABLE loan_repayments
+  ADD COLUMN interest_portion DECIMAL(10,2) NOT NULL DEFAULT 0,
+  ADD COLUMN principal_portion DECIMAL(10,2) NOT NULL DEFAULT 0;
+
+-- Repayments made before this feature were all principal
+UPDATE loan_repayments SET principal_portion = amount_paid
+WHERE interest_portion = 0 AND principal_portion = 0;
+
+CREATE TABLE loan_interest_charges (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  loan_id INT NOT NULL,
+  period_number INT NOT NULL,
+  charged_on DATE NOT NULL,
+  base_amount DECIMAL(10,2) NOT NULL,
+  rate DECIMAL(5,2) NOT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_loan_period (loan_id, period_number),
+  FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE CASCADE
+);

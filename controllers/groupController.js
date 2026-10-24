@@ -676,3 +676,58 @@ exports.updateGroup = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// SET LATE LOAN INTEREST TERMS (treasurer/chair only). Applies to loans requested from now on.
+exports.updateLoanInterestSettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rate, period, grace_days, cap_percent } = req.body;
+    const userId = req.user.userId;
+
+    const role = await getMembership(id, userId);
+    if (role !== 'treasurer' && role !== 'chair') {
+      return res.status(403).json({ success: false, message: 'Only treasurer or chair can change loan interest settings' });
+    }
+
+    const r = parseFloat(rate);
+    const grace = parseInt(grace_days ?? 0, 10);
+    const cap = parseFloat(cap_percent ?? 50);
+
+    if (isNaN(r) || r < 0 || r > 50) {
+      return res.status(400).json({ success: false, message: 'Rate must be between 0 and 50' });
+    }
+    if (!['weekly', 'monthly'].includes(period)) {
+      return res.status(400).json({ success: false, message: 'Period must be weekly or monthly' });
+    }
+    if (isNaN(grace) || grace < 0 || grace > 60) {
+      return res.status(400).json({ success: false, message: 'Grace days must be between 0 and 60' });
+    }
+    if (r > 0 && (isNaN(cap) || cap <= 0 || cap > 100)) {
+      return res.status(400).json({ success: false, message: 'Cap must be between 1 and 100 percent of the loan' });
+    }
+
+    const [groupRows] = await db.query('SELECT name FROM groups_table WHERE id = ?', [id]);
+    const name = groupRows[0]?.name || 'the group';
+
+    await db.query(
+      `UPDATE groups_table
+       SET late_interest_rate = ?, late_interest_period = ?, late_interest_grace_days = ?, late_interest_cap_percent = ?
+       WHERE id = ?`,
+      [r, period, grace, r > 0 ? cap : 50, id]
+    );
+
+    await logActivity({
+      userId,
+      groupId: id,
+      actionType: 'loan_interest_updated',
+      description:
+        r > 0
+          ? `You set late loan interest in ${name} to ${r}% per ${period === 'weekly' ? 'week' : 'month'}`
+          : `You turned off late loan interest in ${name}`
+    });
+
+    res.json({ success: true, message: 'Loan interest settings saved' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
