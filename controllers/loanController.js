@@ -321,10 +321,15 @@ exports.getMyLoans = async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    await notifyOverdueLoans(userId);
+    await notifyOverdueLoans(userId); // also posts any interest that is due
 
     const [rows] = await db.query(
-      `SELECT l.id, g.name AS group_name, l.amount, l.status, l.due_date, l.requested_at, l.approved_at
+      `SELECT l.id, l.group_id, g.name AS group_name, l.amount, l.status, l.due_date, l.requested_at, l.approved_at,
+        l.interest_rate, l.interest_period, l.interest_grace_days, l.interest_cap_percent,
+        COALESCE((SELECT SUM(amount_paid) FROM loan_repayments WHERE loan_id = l.id), 0) AS totalRepaid,
+        COALESCE((SELECT SUM(principal_portion) FROM loan_repayments WHERE loan_id = l.id), 0) AS principalPaid,
+        COALESCE((SELECT SUM(interest_portion) FROM loan_repayments WHERE loan_id = l.id), 0) AS interestPaid,
+        COALESCE((SELECT SUM(amount) FROM loan_interest_charges WHERE loan_id = l.id), 0) AS interestCharged
        FROM loans l
        JOIN groups_table g ON l.group_id = g.id
        WHERE l.user_id = ?
@@ -332,7 +337,7 @@ exports.getMyLoans = async (req, res) => {
       [userId]
     );
 
-    res.json({ success: true, loans: rows });
+    res.json({ success: true, loans: rows.map(withBalances) });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
