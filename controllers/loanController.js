@@ -4,6 +4,7 @@ const { createNotification } = require('./notificationController');
 const { notifyOverdueLoans, formatDate } = require('../utils/overdueLoans');
 const { runOnce, RequestError, validKey } = require('../utils/idempotency');
 const { accrueLoanInterest, withBalances, round2 } = require('../utils/loanInterest');
+const { MIN_APPROVERS, countApprovers } = require('../utils/approvers');
 
 // Helper: check membership + role
 async function getMembership(groupId, userId) {
@@ -32,6 +33,13 @@ exports.requestLoan = async (req, res) => {
     const role = await getMembership(group_id, userId);
     if (!role) {
       return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+    }
+
+        if ((await countApprovers(group_id)) < MIN_APPROVERS) {
+      return res.status(409).json({
+        success: false,
+        message: `Loans are paused: this group needs at least ${MIN_APPROVERS} approvers (treasurer or chair). Ask the group's leaders to assign another.`
+      });
     }
 
     // Block a new request while an unpaid loan already exists in this group

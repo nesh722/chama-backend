@@ -2,6 +2,7 @@ const db = require('../config/db');
 const crypto = require('crypto');
 const { logActivity } = require('../utils/activityLogService');
 const { getCurrentCycleLabel } = require('../utils/cycle');
+const { MIN_APPROVERS } = require('../utils/approvers');
 
 // Helper: check if user is a member of a group, and get their role
 async function getMembership(groupId, userId) {
@@ -258,6 +259,8 @@ exports.getGroupDetails = async (req, res) => {
 
     const group = groupRows[0];
     group.current_cycle = getCurrentCycleLabel(group.contribution_frequency, group.cycle_anchor_date);
+    group.approver_count = members.filter((m) => m.role === 'treasurer' || m.role === 'chair').length;
+    group.min_approvers = MIN_APPROVERS;
 
     res.json({ success: true, group, members });
   } catch (err) {
@@ -482,30 +485,47 @@ exports.changeRole = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can change member roles' });
     }
 
-    const targetRole = await getMembership(id, member_user_id);
-    if (!targetRole) {
-      return res.status(404).json({ success: false, message: 'That user is not a member of this group' });
-    }
+    const isApprover = (r) => r === 'treasurer' || r === 'chair';
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    // Prevent a group from ending up with zero treasurer/chair members
-    if ((targetRole === 'treasurer' || targetRole === 'chair') && new_role !== 'treasurer' && new_role !== 'chair') {
-      const [approverCount] = await db.query(
-        `SELECT COUNT(*) AS count FROM group_members
-         WHERE group_id = ? AND role IN ('treasurer', 'chair')`,
+      const [members] = await conn.query(
+        'SELECT user_id, role FROM group_members WHERE group_id = ? FOR UPDATE',
         [id]
       );
-      if (approverCount[0].count <= 1) {
+      const target = members.find((m) => m.user_id === Number(member_user_id));
+      if (!target) {
+        await conn.rollback();
+        return res.status(404).json({ success: false, message: 'That user is not a member of this group' });
+      }
+
+      const before = members.filter((m) => isApprover(m.role)).length;
+      const after = before - (isApprover(target.role) ? 1 : 0) + (isApprover(new_role) ? 1 : 0);
+
+      if (after < Math.min(MIN_APPROVERS, before)) {
+        await conn.rollback();
         return res.status(400).json({
           success: false,
-          message: 'Cannot remove the last treasurer/chair — assign another approver first'
+          message:
+            before >= MIN_APPROVERS
+              ? `A group must keep at least ${MIN_APPROVERS} approvers (treasurer or chair). Assign another approver first.`
+              : 'Cannot remove the last treasurer/chair. Assign another approver first.'
         });
       }
-    }
 
-    await db.query(
-      'UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?',
-      [new_role, id, member_user_id]
-    );
+      await conn.query('UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?', [
+        new_role,
+        id,
+        member_user_id
+      ]);
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
 
     await logActivity({
       userId: member_user_id,
@@ -530,8 +550,7 @@ exports.removeMember = async (req, res) => {
     if (!member_user_id) {
       return res.status(400).json({ success: false, message: 'member_user_id is required' });
     }
-
-    if (parseInt(member_user_id) === requesterId) {
+    if (Number(member_user_id) === requesterId) {
       return res.status(400).json({ success: false, message: 'You cannot remove yourself this way' });
     }
 
@@ -540,27 +559,45 @@ exports.removeMember = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can remove members' });
     }
 
-    const targetRole = await getMembership(id, member_user_id);
-    if (!targetRole) {
-      return res.status(404).json({ success: false, message: 'That user is not a member of this group' });
-    }
+    const isApprover = (r) => r === 'treasurer' || r === 'chair';
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    if (targetRole === 'treasurer' || targetRole === 'chair') {
-      const [approverCount] = await db.query(
-        `SELECT COUNT(*) AS count FROM group_members WHERE group_id = ? AND role IN ('treasurer', 'chair')`,
+      const [members] = await conn.query(
+        'SELECT user_id, role FROM group_members WHERE group_id = ? FOR UPDATE',
         [id]
       );
-      if (approverCount[0].count <= 1) {
+      const target = members.find((m) => m.user_id === Number(member_user_id));
+      if (!target) {
+        await conn.rollback();
+        return res.status(404).json({ success: false, message: 'That user is not a member of this group' });
+      }
+
+      const before = members.filter((m) => isApprover(m.role)).length;
+      const after = before - (isApprover(target.role) ? 1 : 0);
+
+      if (after < Math.min(MIN_APPROVERS, before)) {
+        await conn.rollback();
         return res.status(400).json({
           success: false,
-          message: 'Cannot remove the last treasurer/chair — assign another approver first'
+          message:
+            before >= MIN_APPROVERS
+              ? `A group must keep at least ${MIN_APPROVERS} approvers (treasurer or chair). Assign another approver first.`
+              : 'Cannot remove the last treasurer/chair. Assign another approver first.'
         });
       }
+
+      await conn.query('DELETE FROM group_members WHERE group_id = ? AND user_id = ?', [id, member_user_id]);
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
     }
 
     const [groupRows] = await db.query('SELECT name FROM groups_table WHERE id = ?', [id]);
-
-    await db.query('DELETE FROM group_members WHERE group_id = ? AND user_id = ?', [id, member_user_id]);
 
     await logActivity({
       userId: member_user_id,
@@ -678,6 +715,9 @@ exports.updateGroup = async (req, res) => {
 };
 
 // SET LATE LOAN INTEREST TERMS (treasurer/chair only). Applies to loans requested from now on.
+const MAX_RATE_BY_PERIOD = { weekly: 5, monthly: 20 };
+const MAX_INTEREST_CAP = 100;
+const MAX_GRACE_DAYS = 30;
 exports.updateLoanInterestSettings = async (req, res) => {
   try {
     const { id } = req.params;
@@ -689,23 +729,27 @@ exports.updateLoanInterestSettings = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can change loan interest settings' });
     }
 
-    const r = parseFloat(rate);
-    const grace = parseInt(grace_days ?? 0, 10);
-    const cap = parseFloat(cap_percent ?? 50);
+const r = parseFloat(rate);
+const grace = parseInt(grace_days, 10);
+const cap = parseFloat(cap_percent);
 
-    if (isNaN(r) || r < 0 || r > 50) {
-      return res.status(400).json({ success: false, message: 'Rate must be between 0 and 50' });
-    }
-    if (!['weekly', 'monthly'].includes(period)) {
-      return res.status(400).json({ success: false, message: 'Period must be weekly or monthly' });
-    }
-    if (isNaN(grace) || grace < 0 || grace > 60) {
-      return res.status(400).json({ success: false, message: 'Grace days must be between 0 and 60' });
-    }
-    if (r > 0 && (isNaN(cap) || cap <= 0 || cap > 100)) {
-      return res.status(400).json({ success: false, message: 'Cap must be between 1 and 100 percent of the loan' });
-    }
+if (!['weekly', 'monthly'].includes(period)) {
+  return res.status(400).json({ success: false, message: 'Period must be weekly or monthly' });
+}
 
+const maxRate = MAX_RATE_BY_PERIOD[period];
+if (isNaN(r) || r < 0 || r > maxRate) {
+  return res.status(400).json({
+    success: false,
+    message: `The ${period} rate must be between 0 and ${maxRate}`
+  });
+}
+if (isNaN(grace) || grace < 0 || grace > MAX_GRACE_DAYS) {
+  return res.status(400).json({ success: false, message: `Grace days must be between 0 and ${MAX_GRACE_DAYS}` });
+}
+if (r > 0 && (isNaN(cap) || cap <= 0 || cap > MAX_INTEREST_CAP)) {
+  return res.status(400).json({ success: false, message: `Cap must be between 1 and ${MAX_INTEREST_CAP} percent of the loan` });
+}
     const [groupRows] = await db.query('SELECT name FROM groups_table WHERE id = ?', [id]);
     const name = groupRows[0]?.name || 'the group';
 
@@ -728,6 +772,7 @@ exports.updateLoanInterestSettings = async (req, res) => {
 
     res.json({ success: true, message: 'Loan interest settings saved' });
   } catch (err) {
+    console.log('Loan interest save failed:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };

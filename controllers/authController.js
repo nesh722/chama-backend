@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { sendPasswordResetEmail } = require('../utils/emailService');
 const multer = require('multer');
 const path = require('path');
+const { MIN_APPROVERS } = require('../utils/approvers');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/avatars/'),
@@ -303,10 +304,10 @@ exports.deleteAccount = async (req, res) => {
         `SELECT COUNT(*) AS count FROM group_members WHERE group_id = ? AND role IN ('treasurer', 'chair')`,
         [row.group_id]
       );
-      if (approverCount[0].count <= 1) {
+      if (approverCount[0].count <= MIN_APPROVERS) {
         return res.status(400).json({
           success: false,
-          message: 'You are the only treasurer/chair in at least one group — assign another approver there before deleting your account'
+          message: `You are one of the group's approvers, and a group must keep at least ${MIN_APPROVERS}. Assign another treasurer/chair there before deleting your account`
         });
       }
     }
