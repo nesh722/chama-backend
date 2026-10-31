@@ -12,7 +12,7 @@ async function getMembership(groupId, userId) {
   return rows.length > 0 ? rows[0].role : null;
 }
 
-// LOG A CONTRIBUTION (self-report by a member, or treasurer logging on someone's behalf)
+// LOG A CONTRIBUTION (self-report by a member, or treasurer/chair logging on someone's behalf)
 exports.logContribution = async (req, res) => {
   try {
     const { group_id, amount, user_id, idempotency_key } = req.body;
@@ -46,8 +46,8 @@ exports.logContribution = async (req, res) => {
 
     const targetUserId = user_id || requesterId;
 
-    if (targetUserId !== requesterId && requesterRole !== 'treasurer') {
-      return res.status(403).json({ success: false, message: 'Only the treasurer can log contributions for other members' });
+    if (targetUserId !== requesterId && requesterRole !== 'treasurer' && requesterRole !== 'chair') {
+      return res.status(403).json({ success: false, message: 'Only the treasurer or chair can log contributions for other members' });
     }
 
     const targetRole = await getMembership(group_id, targetUserId);

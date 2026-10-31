@@ -39,7 +39,7 @@ async function getOrCreateInviteToken(groupId) {
   return token;
 }
 
-// CREATE GROUP — creator automatically becomes treasurer
+// CREATE GROUP — creator automatically becomes chair and first approver 
 exports.createGroup = async (req, res) => {
   try {
     const { name, description, contribution_amount, contribution_frequency } = req.body;
@@ -58,7 +58,7 @@ exports.createGroup = async (req, res) => {
 
     await db.query(
       'INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, ?)',
-      [groupId, userId, 'treasurer']
+      [groupId, userId, 'chair']
     );
 
     await logActivity({

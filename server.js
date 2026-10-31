@@ -16,6 +16,7 @@ const { notifyOverdueLoans } = require('./utils/overdueLoans');
 const { announceNewCycles } = require('./utils/cycleAnnouncements');
 const { sendDueSoonReminders } = require('./utils/dueSoonReminders');
 const webRoutes = require('./routes/webRoutes');
+const mpesaRoutes = require('./routes/mpesaRoutes');
 
 const app = express();
 app.use(cors());
@@ -23,6 +24,7 @@ app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 app.use('/', webRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/mpesa', mpesaRoutes);
 
 // Test route
 app.get('/', (req, res) => {

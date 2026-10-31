@@ -216,3 +216,29 @@ CREATE TABLE loan_interest_charges (
   UNIQUE KEY uq_loan_period (loan_id, period_number),
   FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS mpesa_transactions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  group_id INT NOT NULL,
+  purpose ENUM('contribution', 'savings', 'loan_repayment') NOT NULL,
+  reference_id INT DEFAULT NULL,              -- loan id when purpose = 'loan_repayment'
+  amount DECIMAL(10,2) NOT NULL,
+  phone VARCHAR(15) NOT NULL,                 -- 2547XXXXXXXX
+  note VARCHAR(255) DEFAULT NULL,             -- optional savings note
+  merchant_request_id VARCHAR(64) DEFAULT NULL,
+  checkout_request_id VARCHAR(64) DEFAULT NULL,
+  status ENUM('pending', 'success', 'failed', 'cancelled') NOT NULL DEFAULT 'pending',
+  result_code INT DEFAULT NULL,
+  result_desc VARCHAR(255) DEFAULT NULL,
+  mpesa_receipt VARCHAR(32) DEFAULT NULL,
+  fulfilled TINYINT(1) NOT NULL DEFAULT 0,    -- 1 once the contribution / saving / repayment row has been created
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_checkout (checkout_request_id),
+  UNIQUE KEY uq_receipt (mpesa_receipt),
+  INDEX idx_user_status (user_id, status),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE
+);
+ALTER TABLE mpesa_transactions ADD COLUMN fulfil_error VARCHAR(255) DEFAULT NULL AFTER fulfilled;
