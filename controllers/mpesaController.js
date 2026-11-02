@@ -38,8 +38,12 @@ function safeEqual(a, b) {
 
 // Don't hit Daraja's query endpoint on every 3-second poll
 const lastQueryAt = new Map();
+const payStartedAt = new Map();
 function shouldQuery(paymentId) {
   const now = Date.now();
+  // Give Safaricom's callback (which carries the receipt) a head start before we ask Daraja ourselves
+  const started = payStartedAt.get(paymentId);
+  if (started && now - started < 20000) return false;
   if (now - (lastQueryAt.get(paymentId) || 0) < 8000) return false;
   lastQueryAt.set(paymentId, now);
   return true;
@@ -87,7 +91,28 @@ async function recordOutcome(checkoutRequestId, outcome) {
       'SELECT * FROM mpesa_transactions WHERE checkout_request_id = ? FOR UPDATE',
       [checkoutRequestId]
     );
-    if (rows.length === 0 || rows[0].status !== 'pending') {
+    // The status check can settle a payment before the callback arrives, and it never carries the
+    // receipt. If the callback shows up late, fill the receipt in.
+    if (
+      rows.length > 0 &&
+      rows[0].status === 'success' &&
+      !rows[0].mpesa_receipt &&
+      outcome.resultCode === 0 &&
+      outcome.receipt
+    ) {
+      await conn.query('UPDATE mpesa_transactions SET mpesa_receipt = ? WHERE id = ?', [outcome.receipt, rows[0].id]);
+      rows[0].mpesa_receipt = outcome.receipt;
+    }
+
+    // A payment closed as "failed" only because Daraja said 4999 (still processing) can still be
+    // rescued if the money turns out to have moved
+    const wronglyFailed =
+      rows.length > 0 &&
+      rows[0].status === 'failed' &&
+      Number(rows[0].result_code) === 4999 &&
+      outcome.resultCode === 0;
+
+    if (rows.length === 0 || (rows[0].status !== 'pending' && !wronglyFailed)) {
       await conn.commit();
       return rows[0] || null; // unknown, or already settled
     }
@@ -349,6 +374,7 @@ exports.pay = async (req, res) => {
       [userId, groupId, purpose, referenceId, wholeAmount, payerPhone, purpose === 'savings' ? (note || null) : null]
     );
     paymentId = ins.insertId;
+    payStartedAt.set(paymentId, Date.now());
 
     let push;
     try {
@@ -387,12 +413,16 @@ exports.pay = async (req, res) => {
 exports.callback = async (req, res) => {
   const expected = process.env.MPESA_CALLBACK_SECRET;
   if (!expected || !safeEqual(req.params.secret, expected)) {
+    console.log('M-Pesa callback rejected: the secret in the URL does not match MPESA_CALLBACK_SECRET');
     return res.status(403).json({ ResultCode: 1, ResultDesc: 'Rejected' });
   }
 
   try {
     const outcome = parseCallback(req.body);
-    if (outcome) await settle(outcome.checkoutRequestId, outcome);
+    if (outcome) {
+      console.log(`M-Pesa callback received: ${outcome.checkoutRequestId} (result ${outcome.resultCode})`);
+      await settle(outcome.checkoutRequestId, outcome);
+    }
   } catch (err) {
     // Still answer 200: Safaricom won't retry usefully, and the status check can recover this payment.
     console.log('M-Pesa callback error:', err.message);
@@ -417,7 +447,8 @@ exports.status = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
 
-    if (row.status === 'pending' && row.checkout_request_id) {
+    const couldBeWronglyFailed = row.status === 'failed' && Number(row.result_code) === 4999;
+    if ((row.status === 'pending' || couldBeWronglyFailed) && row.checkout_request_id) {
       // Fallback for a missing callback: ask Daraja directly (rate-limited)
       if (shouldQuery(row.id)) {
         try {

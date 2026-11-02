@@ -1,3 +1,7 @@
+// utils/mpesa.js
+// Thin client for Safaricom Daraja: M-Pesa Express (STK Push).
+// Uses Node's built-in fetch (Node 18+), so no extra dependency is needed.
+
 const BASE_URL =
   process.env.MPESA_ENV === 'production'
     ? 'https://api.safaricom.co.ke'
@@ -139,8 +143,9 @@ async function stkQuery(checkoutRequestId) {
 
   const data = await res.json().catch(() => ({}));
 
-  // While the customer hasn't answered yet, Daraja replies with an error body instead of a result
-  if (data.ResultCode === undefined) {
+  // While the customer hasn't finished yet, Daraja replies with an error body instead of a result,
+  // or with result code 4999 ("The transaction is still under processing"). Neither is final.
+  if (data.ResultCode === undefined || Number(data.ResultCode) === 4999) {
     return { pending: true, raw: data };
   }
   return {

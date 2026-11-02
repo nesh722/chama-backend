@@ -242,3 +242,42 @@ CREATE TABLE IF NOT EXISTS mpesa_transactions (
   FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE
 );
 ALTER TABLE mpesa_transactions ADD COLUMN fulfil_error VARCHAR(255) DEFAULT NULL AFTER fulfilled;
+
+-- M-Pesa B2C (money out): payouts and loan disbursements
+-- Run in phpMyAdmin, then append this block to migrations/migrations.sql so the schema stays in one place.
+
+CREATE TABLE IF NOT EXISTS mpesa_b2c_transactions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  purpose ENUM('payout', 'loan_disbursement') NOT NULL,
+  group_id INT NOT NULL,
+  user_id INT NOT NULL,                       -- who receives the money
+  reference_id INT NOT NULL,                  -- payout_rotations.id or loans.id
+  amount DECIMAL(10,2) NOT NULL,              -- whole shillings, as sent to M-Pesa
+  phone VARCHAR(15) NOT NULL,                 -- 2547XXXXXXXX
+  initiated_by INT NOT NULL,                  -- the treasurer / chair who pressed send
+  request_ref VARCHAR(36) NOT NULL,           -- our own unique id for this attempt
+  originator_conversation_id VARCHAR(64) DEFAULT NULL,
+  conversation_id VARCHAR(64) DEFAULT NULL,
+  status ENUM('pending', 'success', 'failed', 'timeout') NOT NULL DEFAULT 'pending',
+  result_code INT DEFAULT NULL,
+  result_desc VARCHAR(255) DEFAULT NULL,
+  mpesa_receipt VARCHAR(32) DEFAULT NULL,
+  receiver_name VARCHAR(100) DEFAULT NULL,
+  fulfilled TINYINT(1) NOT NULL DEFAULT 0,    -- 1 once the payout / loan has been marked as paid out
+  fulfil_error VARCHAR(255) DEFAULT NULL,     -- why marking it failed, so a paid-out transfer is never silently lost
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_b2c_request_ref (request_ref),
+  UNIQUE KEY uq_b2c_receipt (mpesa_receipt),
+  INDEX idx_b2c_conversation (conversation_id),
+  INDEX idx_b2c_originator (originator_conversation_id),
+  INDEX idx_b2c_reference (purpose, reference_id, status),
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (initiated_by) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Loans paid out through M-Pesa remember when and with which receipt
+ALTER TABLE loans
+  ADD COLUMN disbursed_at DATETIME DEFAULT NULL,
+  ADD COLUMN disbursement_receipt VARCHAR(32) DEFAULT NULL;
