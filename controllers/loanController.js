@@ -95,6 +95,7 @@ exports.requestLoan = async (req, res) => {
           a.user_id,
           'New Loan Request',
           `${info[0].borrower_name} requested a loan of KES ${amount} in ${info[0].group_name}. Open the Loans tab to review it.`
+          , group_id
         );
       }
     } catch (notifyErr) {
@@ -168,6 +169,7 @@ exports.decideLoan = async (req, res) => {
         decision === 'approved'
           ? `Your loan of KES ${loan.amount} in ${groupName} was approved. Please repay by ${loan.due_date ? formatDate(loan.due_date) : 'the agreed date'}.`
           : `Your loan request of KES ${loan.amount} in ${groupName} was rejected.`
+        , loan.group_id
       );
     } catch (notifyErr) {
       console.log('Loan decision notification failed:', notifyErr.message);

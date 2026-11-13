@@ -45,7 +45,7 @@ exports.create = async (req, res) => {
       for (const m of members) {
         if (Number(m.user_id) === userId) continue;
         try {
-          await createNotification(m.user_id, `Notice: ${title}`, `${g[0] ? g[0].name + ': ' : ''}${body.length > 140 ? body.slice(0, 137) + '...' : body}`);
+          await createNotification(m.user_id, `Notice: ${title}`, body.length > 140 ? body.slice(0, 137) + '...' : body, group_id);
         } catch (err) {
           console.log('Notice notification failed:', err.message);
         }

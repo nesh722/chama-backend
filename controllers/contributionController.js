@@ -220,6 +220,7 @@ exports.sendContributionReminder = async (req, res) => {
           m.user_id,
           'Contribution Reminder',
           `Your contribution for ${describeCycle(cycle)} in ${group.name} is still pending. KES ${remaining} remaining of KES ${target}.`
+          , group_id
         );
         await db.query(
           'INSERT INTO contribution_reminders (group_id, user_id, cycle_period, sent_by) VALUES (?, ?, ?, ?)',

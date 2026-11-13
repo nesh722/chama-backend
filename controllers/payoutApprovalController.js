@@ -23,10 +23,10 @@ async function nameOf(userId) {
 }
 
 // Best-effort: the decision is already saved, so a notification hiccup must never fail the request
-async function tell(userIds, title, message) {
+async function tell(userIds, title, message, groupId = null) {
   for (const id of userIds) {
     try {
-      await createNotification(id, title, message);
+      await createNotification(id, title, message, groupId);
     } catch (err) {
       console.log('Payout approval notification failed:', err.message);
     }
@@ -129,7 +129,8 @@ exports.requestApproval = async (req, res) => {
     await tell(
       eligible,
       'Payout Needs Approval',
-      `${requesterName} asked to pay KES ${amount} to ${recipientName}. Open the Payouts tab to approve or reject it.`
+      `${requesterName} asked to pay KES ${amount} to ${recipientName}. Open the Payouts tab to approve or reject it.`,
+      groupId
     );
 
     res.status(201).json({ success: true, message: 'Approval requested', approvalId });
@@ -233,7 +234,8 @@ exports.decide = async (req, res) => {
       decision === 'approved' ? 'Payout Approved' : 'Payout Rejected',
       decision === 'approved'
         ? `${deciderName} approved the payout of KES ${amt} to ${recipientName}. You can pay it out now.`
-        : `${deciderName} rejected the payout of KES ${amt} to ${recipientName}.`
+        : `${deciderName} rejected the payout of KES ${amt} to ${recipientName}.`,
+        row.group_id
     );
 
     res.json({ success: true, message: `Payout ${decision}` });

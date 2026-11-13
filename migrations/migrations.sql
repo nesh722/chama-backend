@@ -386,3 +386,8 @@ CREATE TABLE IF NOT EXISTS announcements (
   FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
   FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 );
+
+-- Lets a member say why they can't attend (shown to the secretary and chair next to the apology)
+ALTER TABLE meeting_attendance ADD COLUMN IF NOT EXISTS reason VARCHAR(255) NULL AFTER status;
+
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS group_id INT NULL AFTER user_id;

@@ -26,9 +26,9 @@ async function nameOf(userId) {
 }
 
 // The claim is already saved, so a notification hiccup must never fail the request
-async function tell(userId, title, message) {
+async function tell(userId, title, message, groupId = null){
   try {
-    await createNotification(userId, title, message);
+    await createNotification(userId, title, message, groupId);
   } catch (err) {
     console.log('Cash claim notification failed:', err.message);
   }
@@ -141,6 +141,7 @@ exports.create = async (req, res) => {
       receiverId,
       'Cash Payment To Confirm',
       `${payerName} says they handed you KES ${money(paying)} in cash ${kind === 'loan_repayment' ? 'for their loan' : 'for their contribution'}. Open the group to confirm what you received.`
+        ,group_id
     );
 
     res.status(201).json({ success: true, message: 'Sent for confirmation', claimId });
@@ -328,6 +329,7 @@ exports.confirm = async (req, res) => {
         claim.user_id,
         'Cash Payment Confirmed',
         `${receiverName} confirmed your cash contribution of KES ${money(confirmed)}${adjustedNote}.`
+        ,claim.group_id
       );
     } else {
       await logSafely({
@@ -343,6 +345,7 @@ exports.confirm = async (req, res) => {
         claim.user_id,
         'Cash Payment Confirmed',
         `${receiverName} confirmed your cash loan repayment of KES ${money(confirmed)}${adjustedNote}.${result.loanRepaid ? ' Your loan is fully repaid.' : ''}`
+        ,claim.group_id
       );
     }
 
@@ -381,6 +384,7 @@ exports.reject = async (req, res) => {
       claim.user_id,
       'Cash Payment Not Confirmed',
       `${receiverName} did not confirm your cash payment of KES ${money(claim.claimed_amount)}.${reason ? ` Reason: “${reason}”.` : ''} Nothing was recorded.`
+      ,claim.group_id
     );
 
     res.json({ success: true, message: 'Rejected. Nothing was recorded.' });

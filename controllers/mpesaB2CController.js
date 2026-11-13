@@ -250,7 +250,7 @@ async function announce(row) {
         description: `You received a payout of KES ${amt} via M-Pesa`,
         amount: amt
       });
-      await createNotification(row.user_id, 'Payout Sent', `Your payout of KES ${amt} was sent to your M-Pesa${code}.`);
+      await createNotification(row.user_id, 'Payout Sent', `Your payout of KES ${amt} was sent to your M-Pesa${code}.`, row.group_id);
     } else {
       await logActivity({
         userId: row.user_id,
@@ -259,7 +259,7 @@ async function announce(row) {
         description: `Your loan of KES ${amt} was sent to your M-Pesa`,
         amount: amt
       });
-      await createNotification(row.user_id, 'Loan Sent', `Your loan of KES ${amt} was sent to your M-Pesa${code}.`);
+      await createNotification(row.user_id, 'Loan Sent', `Your loan of KES ${amt} was sent to your M-Pesa${code}.`, row.group_id);
     }
   } catch (err) {
     console.log('M-Pesa B2C post-transfer notices failed:', err.message);

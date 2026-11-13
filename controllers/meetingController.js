@@ -36,7 +36,7 @@ async function tellMembers(groupId, exceptUserId, title, message) {
     for (const m of members) {
       if (Number(m.user_id) === Number(exceptUserId)) continue;
       try {
-        await createNotification(m.user_id, title, message);
+        await createNotification(m.user_id, title, message, groupId);
       } catch (err) {
         console.log('Meeting notification failed:', err.message);
       }
@@ -176,17 +176,19 @@ exports.getOne = async (req, res) => {
       'SELECT u.id, u.full_name, gm.role FROM group_members gm JOIN users u ON u.id = gm.user_id WHERE gm.group_id = ? ORDER BY u.full_name',
       [meeting.group_id]
     );
-    const [attendance] = await db.query('SELECT user_id, status FROM meeting_attendance WHERE meeting_id = ?', [meeting.id]);
+    const [attendance] = await db.query('SELECT user_id, status, reason FROM meeting_attendance WHERE meeting_id = ?', [meeting.id]);
     const byUser = {};
+    const reasonOf = {};
     attendance.forEach((a) => {
       byUser[a.user_id] = a.status;
+      reasonOf[a.user_id] = a.reason || null;
     });
 
     res.json({
       success: true,
       canRecord: canRecord(role),
       meeting: shape(meeting),
-      attendance: members.map((m) => ({ userId: m.id, name: m.full_name, role: m.role, status: byUser[m.id] || null }))
+      attendance: members.map((m) => ({ userId: m.id, name: m.full_name, role: m.role, status: byUser[m.id] || null, reason: canRecord(role) || m.id === userId ? reasonOf[m.id] || null : null }))
     });
   } catch (err) {
     sendError(res, err);
@@ -275,7 +277,7 @@ exports.saveAttendance = async (req, res) => {
           await conn.query('DELETE FROM meeting_attendance WHERE meeting_id = ? AND user_id = ?', [meeting.id, memberId]);
         } else {
           await conn.query(
-            'INSERT INTO meeting_attendance (meeting_id, user_id, status, marked_by) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status), marked_by = VALUES(marked_by)',
+            'INSERT INTO meeting_attendance (meeting_id, user_id, status, marked_by) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE reason = IF(VALUES(status) = \'apology\', reason, NULL), status = VALUES(status), marked_by = VALUES(marked_by)',
             [meeting.id, memberId, r.status, userId]
           );
         }
@@ -341,9 +343,12 @@ exports.apology = async (req, res) => {
       return res.json({ success: true, message: 'Apology withdrawn' });
     }
 
+    const reason = String(req.body.reason || '').trim();
+    if (reason.length > 255) return res.status(400).json({ success: false, message: 'Keep the reason under 255 characters' });
+
     await db.query(
-      `INSERT INTO meeting_attendance (meeting_id, user_id, status, marked_by) VALUES (?, ?, 'apology', ?) ON DUPLICATE KEY UPDATE status = 'apology', marked_by = VALUES(marked_by)`,
-      [meeting.id, userId, userId]
+      `INSERT INTO meeting_attendance (meeting_id, user_id, status, marked_by, reason) VALUES (?, ?, 'apology', ?, ?) ON DUPLICATE KEY UPDATE status = 'apology', marked_by = VALUES(marked_by), reason = VALUES(reason)`,
+      [meeting.id, userId, userId, reason || null]
     );
     res.json({ success: true, message: 'Apology sent' });
   } catch (err) {

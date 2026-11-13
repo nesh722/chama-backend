@@ -13,20 +13,25 @@ async function getMembership(groupId, userId) {
 }
 
 // Helper: create a notification (used internally by other controllers too)
-async function createNotification(userId, title, message) {
+async function createNotification(userId, title, message, groupId = null) {
   await db.query(
-    'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-    [userId, title, message]
+    'INSERT INTO notifications (user_id, group_id, title, message) VALUES (?, ?, ?, ?)',
+    [userId, groupId, title, message]
   );
 
   // Also send a push notification, if this user has a registered device
   try {
     const [rows] = await db.query('SELECT push_token FROM users WHERE id = ?', [userId]);
     const token = rows[0]?.push_token;
+    let pushTitle = title;
+    if (groupId) {
+      const [g] = await db.query('SELECT name FROM groups_table WHERE id = ?', [groupId]);
+      if (g[0]) pushTitle = `${g[0].name}: ${title}`;
+    }
 
             if (token && Expo.isExpoPushToken(token)) {
       const tickets = await expo.sendPushNotificationsAsync([
-        { to: token, sound: 'default', title, body: message }
+        { to: token, sound: 'default', title: pushTitle, body: message }
       ]);
       tickets.forEach((t) => {
         if (t.status === 'error') console.log('Push rejected:', t.message, t.details);
@@ -45,9 +50,11 @@ async function createNotification(userId, title, message) {
 exports.getMyNotifications = async (req, res) => {
   try {
     const userId = req.user.userId;
-
     const [rows] = await db.query(
-      'SELECT id, title, message, is_read, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC',
+      `SELECT n.id, n.title, n.message, n.is_read, n.created_at, n.group_id, g.name AS group_name
+       FROM notifications n
+       LEFT JOIN groups_table g ON g.id = n.group_id
+       WHERE n.user_id = ? ORDER BY n.created_at DESC`,
       [userId]
     );
 
@@ -106,11 +113,8 @@ exports.sendNotification = async (req, res) => {
       return res.status(400).json({ success: false, message: 'That user is not a member of this group' });
     }
 
-    // Prefix the group name, so the recipient can see where the message came from
-    const [groupRows] = await db.query('SELECT name FROM groups_table WHERE id = ?', [group_id]);
-    const groupName = groupRows[0]?.name || 'Your group';
-
-    await createNotification(user_id, `${groupName}: ${cleanTitle}`, cleanMessage);
+    
+        await createNotification(user_id, cleanTitle, cleanMessage, group_id);
     res.status(201).json({ success: true, message: 'Notification sent' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
