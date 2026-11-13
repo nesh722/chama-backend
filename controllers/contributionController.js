@@ -12,148 +12,16 @@ async function getMembership(groupId, userId) {
   return rows.length > 0 ? rows[0].role : null;
 }
 
-// LOG A CONTRIBUTION (self-report by a member, or treasurer/chair logging on someone's behalf)
+// LOG A CONTRIBUTION: switched off. A cash payment is no longer recorded on the payer's word alone.
+// The member claims it and the treasurer / chair who received the cash confirms it (see cashClaimController.js).
+// M-Pesa payments are recorded automatically by mpesaController.js. This stub only answers old app versions clearly.
 exports.logContribution = async (req, res) => {
-  try {
-    const { group_id, amount, user_id, idempotency_key } = req.body;
-    const requesterId = req.user.userId;
-
-    const paying = parseFloat(amount);
-    if (!group_id || !paying || paying <= 0) {
-      return res.status(400).json({ success: false, message: 'group_id and a positive amount are required' });
-    }
-    if (
-      idempotency_key !== undefined &&
-      (typeof idempotency_key !== 'string' || idempotency_key.length < 8 || idempotency_key.length > 64)
-    ) {
-      return res.status(400).json({ success: false, message: 'Invalid idempotency_key' });
-    }
-
-    const [groupRows] = await db.query(
-      'SELECT contribution_amount, contribution_frequency, cycle_anchor_date FROM groups_table WHERE id = ?',
-      [group_id]
-    );
-    if (groupRows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Group not found' });
-    }
-    const group = groupRows[0];
-    const cyclePeriod = getCurrentCycleLabel(group.contribution_frequency, group.cycle_anchor_date);
-
-    const requesterRole = await getMembership(group_id, requesterId);
-    if (!requesterRole) {
-      return res.status(403).json({ success: false, message: 'You are not a member of this group' });
-    }
-
-    const targetUserId = user_id || requesterId;
-
-    if (targetUserId !== requesterId && requesterRole !== 'treasurer' && requesterRole !== 'chair') {
-      return res.status(403).json({ success: false, message: 'Only the treasurer or chair can log contributions for other members' });
-    }
-
-    const targetRole = await getMembership(group_id, targetUserId);
-    if (!targetRole) {
-      return res.status(400).json({ success: false, message: 'Target user is not a member of this group' });
-    }
-
-    // Validation is done, so claim the key. A retry of a payment that already went through
-    // gets the saved result back instead of being added a second time.
-    let keyClaimed = false;
-    if (idempotency_key) {
-      const claim = await claimKey(idempotency_key, requesterId, 'log_contribution');
-      if (claim.status === 'done') {
-        return res.status(200).json({ ...claim.response, duplicate: true });
-      }
-      if (claim.status === 'in_progress') {
-        return res.status(409).json({ success: false, message: 'This payment is already being processed. Please wait a moment.' });
-      }
-      keyClaimed = true;
-    }
-
-    const target = parseFloat(group.contribution_amount);
-    let payload;
-
-    // The contribution row and the ledger entry are saved together or not at all
-    const conn = await db.getConnection();
-    try {
-      await conn.beginTransaction();
-
-      const [existing] = await conn.query(
-        'SELECT id, amount FROM contributions WHERE group_id = ? AND user_id = ? AND cycle_period = ? FOR UPDATE',
-        [group_id, targetUserId, cyclePeriod]
-      );
-
-      const alreadyPaid = existing.length > 0 ? parseFloat(existing[0].amount) : 0;
-      const newTotal = alreadyPaid + paying;
-      const status = newTotal >= target ? 'paid' : 'partial';
-      const remaining = Math.max(target - newTotal, 0);
-
-      let contributionId;
-      if (existing.length > 0) {
-        contributionId = existing[0].id;
-        await conn.query(
-          'UPDATE contributions SET amount = ?, status = ?, paid_at = NOW() WHERE id = ?',
-          [newTotal, status, contributionId]
-        );
-      } else {
-        const [result] = await conn.query(
-          'INSERT INTO contributions (group_id, user_id, amount, cycle_period, status, paid_at) VALUES (?, ?, ?, ?, ?, NOW())',
-          [group_id, targetUserId, newTotal, cyclePeriod, status]
-        );
-        contributionId = result.insertId;
-      }
-
-      await conn.query(
-        'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-        [group_id, targetUserId, 'contribution', paying, contributionId]
-      );
-
-      await conn.commit();
-
-      payload = {
-        success: true,
-        message: 'Contribution logged successfully',
-        contributionId,
-        cyclePeriod,
-        status,
-        paidSoFar: newTotal,
-        remaining
-      };
-    } catch (writeErr) {
-      await conn.rollback();
-      if (keyClaimed) await releaseKey(idempotency_key, requesterId);
-      throw writeErr;
-    } finally {
-      conn.release();
-    }
-
-    // The payment is committed. Everything below is best-effort and must never undo or re-run it.
-    try {
-      await logActivity({
-        userId: targetUserId,
-        groupId: group_id,
-        actionType: 'logged_contribution',
-        description: payload.remaining > 0
-          ? `You paid KES ${paying} toward ${cyclePeriod} (KES ${payload.remaining} still remaining)`
-          : `You completed your KES ${target} contribution for ${cyclePeriod}`,
-        amount: paying
-      });
-    } catch (logErr) {
-      console.log('Activity log failed:', logErr.message);
-    }
-
-    if (keyClaimed) {
-      try {
-        await saveResponse(idempotency_key, requesterId, payload);
-      } catch (saveErr) {
-        console.log('Saving idempotency response failed:', saveErr.message);
-      }
-    }
-
-    return res.status(201).json(payload);
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  res.status(410).json({
+    success: false,
+    message: 'Cash payments now need to be confirmed by the treasurer or chair who received them. Update the app and use "I paid cash".'
+  });
 };
+
 // GET ALL CONTRIBUTIONS FOR A GROUP (with member names)
 exports.getGroupContributions = async (req, res) => {
   try {
@@ -289,8 +157,8 @@ exports.sendContributionReminder = async (req, res) => {
     }
 
     const senderRole = await getMembership(group_id, senderId);
-    if (senderRole !== 'treasurer' && senderRole !== 'chair') {
-      return res.status(403).json({ success: false, message: 'Only the treasurer or chair can send reminders' });
+    if (senderRole !== 'treasurer' && senderRole !== 'chair' && senderRole !== 'secretary') {
+      return res.status(403).json({ success: false, message: 'Only the treasurer, chair, or secretary can send reminders' });
     }
 
     const [groupRows] = await db.query(

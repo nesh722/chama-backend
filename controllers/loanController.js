@@ -179,113 +179,14 @@ exports.decideLoan = async (req, res) => {
   }
 };
 
-// RECORD A REPAYMENT
+// RECORD A REPAYMENT: switched off. A cash repayment is no longer recorded on someone's word alone.
+// The borrower claims it and the treasurer / chair who received the cash confirms it (see cashClaimController.js).
+// M-Pesa repayments are recorded automatically by mpesaController.js. This stub only answers old app versions clearly.
 exports.recordRepayment = async (req, res) => {
-  try {
-    const { loanId } = req.params;
-    const { amount_paid, idempotency_key } = req.body;
-    const userId = req.user.userId;
-    const paying = round2(parseFloat(amount_paid));
-
-    if (!paying || paying <= 0) {
-      return res.status(400).json({ success: false, message: 'A positive amount_paid is required' });
-    }
-    if (!validKey(idempotency_key)) {
-      return res.status(400).json({ success: false, message: 'Invalid idempotency_key' });
-    }
-
-    const [loanRows] = await db.query('SELECT * FROM loans WHERE id = ?', [loanId]);
-    if (loanRows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Loan not found' });
-    }
-    const loan = loanRows[0];
-
-    const role = await getMembership(loan.group_id, userId);
-    if (userId !== loan.user_id && role !== 'treasurer' && role !== 'chair') {
-      return res.status(403).json({ success: false, message: 'Not authorized to record this repayment' });
-    }
-
-    // Post any interest that is due today before taking the payment, so it is allocated correctly
-    await accrueLoanInterest({ loanId: loan.id });
-
-    const { replayed, payload } = await runOnce(
-      { key: idempotency_key, userId, endpoint: 'record_repayment' },
-      async (conn) => {
-        const [locked] = await conn.query('SELECT amount, status FROM loans WHERE id = ? FOR UPDATE', [loanId]);
-        if (locked[0].status !== 'approved') {
-          throw new RequestError(409, 'Only an approved, unpaid loan can receive repayments');
-        }
-
-        const [sums] = await conn.query(
-          `SELECT
-             COALESCE((SELECT SUM(principal_portion) FROM loan_repayments WHERE loan_id = ?), 0) AS principalPaid,
-             COALESCE((SELECT SUM(interest_portion) FROM loan_repayments WHERE loan_id = ?), 0) AS interestPaid,
-             COALESCE((SELECT SUM(amount) FROM loan_interest_charges WHERE loan_id = ?), 0) AS interestCharged`,
-          [loanId, loanId, loanId]
-        );
-
-        const principalOutstanding = round2(parseFloat(locked[0].amount) - parseFloat(sums[0].principalPaid));
-        const interestOutstanding = Math.max(round2(parseFloat(sums[0].interestCharged) - parseFloat(sums[0].interestPaid)), 0);
-        const totalOutstanding = round2(principalOutstanding + interestOutstanding);
-
-        if (paying > totalOutstanding) {
-          throw new RequestError(400, `That is more than the outstanding balance of KES ${totalOutstanding}`);
-        }
-
-        // Interest is cleared first, then principal
-        const toInterest = round2(Math.min(paying, interestOutstanding));
-        const toPrincipal = round2(paying - toInterest);
-
-        await conn.query(
-          'INSERT INTO loan_repayments (loan_id, amount_paid, interest_portion, principal_portion) VALUES (?, ?, ?, ?)',
-          [loanId, paying, toInterest, toPrincipal]
-        );
-        await conn.query(
-          'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-          [loan.group_id, loan.user_id, 'loan_repayment', paying, loanId]
-        );
-
-        const remaining = round2(totalOutstanding - paying);
-        const loanRepaid = remaining <= 0;
-        if (loanRepaid) {
-          await conn.query('UPDATE loans SET status = ? WHERE id = ?', ['repaid', loanId]);
-        }
-
-        return {
-          success: true,
-          message: 'Repayment recorded',
-          loanAmount: parseFloat(locked[0].amount),
-          remaining,
-          loanRepaid,
-          toInterest,
-          toPrincipal
-        };
-      }
-    );
-
-    if (replayed) return res.status(200).json({ ...payload, duplicate: true });
-
-    try {
-      await logActivity({
-        userId: loan.user_id,
-        groupId: loan.group_id,
-        actionType: 'loan_repayment',
-        description: payload.loanRepaid
-          ? `You repaid KES ${paying} and cleared your loan`
-          : `You repaid KES ${paying} on your loan${payload.toInterest > 0 ? ` (KES ${payload.toInterest} covered late interest)` : ''}, KES ${payload.remaining} left`,
-        amount: paying
-      });
-    } catch (logErr) {
-      console.log('Activity log failed:', logErr.message);
-    }
-
-    res.status(201).json(payload);
-  } catch (err) {
-    if (err instanceof RequestError) {
-      return res.status(err.status).json({ success: false, message: err.message });
-    }
-    res.status(500).json({ success: false, error: err.message });
-  }
+  res.status(410).json({
+    success: false,
+    message: 'Cash repayments now need to be confirmed by the treasurer or chair who received them. Update the app and use "I paid cash".'
+  });
 };
 // GET ALL LOANS FOR A GROUP
 // GET LOANS FOR A GROUP

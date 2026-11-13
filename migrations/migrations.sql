@@ -281,3 +281,108 @@ CREATE TABLE IF NOT EXISTS mpesa_b2c_transactions (
 ALTER TABLE loans
   ADD COLUMN disbursed_at DATETIME DEFAULT NULL,
   ADD COLUMN disbursement_receipt VARCHAR(32) DEFAULT NULL;
+
+  -- Second approver for payouts
+-- Run in phpMyAdmin BEFORE replacing the backend files, then append this block to migrations/migrations.sql.
+
+CREATE TABLE IF NOT EXISTS payout_approvals (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  rotation_id INT NOT NULL,                   -- payout_rotations.id of the turn. No foreign key on purpose: starting a new cycle
+                                              -- deletes the old rotation rows, and the approval history must survive that.
+  recipient_id INT NOT NULL,                  -- who is being paid
+  amount DECIMAL(10,2) NOT NULL,              -- the amount the approver saw. If the payout amount changes later, the approval no longer counts.
+  requested_by INT NOT NULL,                  -- the treasurer / chair who asked
+  status ENUM('requested', 'approved', 'rejected', 'cancelled', 'used') NOT NULL DEFAULT 'requested',
+  decided_by INT DEFAULT NULL,                -- the second treasurer / chair who approved or rejected
+  decided_at DATETIME DEFAULT NULL,
+  used_at DATETIME DEFAULT NULL,              -- when the approved payout was actually paid out
+  requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_pa_rotation (rotation_id, status),
+  INDEX idx_pa_group (group_id, status),
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Cash payments need confirmation
+-- A member says "I paid KES X in cash to <treasurer/chair>". Nothing is recorded until that person confirms.
+-- Run in phpMyAdmin BEFORE replacing the backend files, then append this block to migrations/migrations.sql.
+
+CREATE TABLE IF NOT EXISTS cash_claims (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  user_id INT NOT NULL,                       -- the member who says they paid
+  kind ENUM('contribution', 'loan_repayment') NOT NULL,
+  loan_id INT DEFAULT NULL,                   -- set for loan repayments
+  claimed_amount DECIMAL(10,2) NOT NULL,      -- what the member says they handed over
+  confirmed_amount DECIMAL(10,2) DEFAULT NULL,-- what the receiver says they actually got (can be less than claimed)
+  receiver_id INT NOT NULL,                   -- the treasurer / chair the money was handed to; only they can confirm
+  status ENUM('pending', 'confirmed', 'rejected', 'cancelled') NOT NULL DEFAULT 'pending',
+  reject_reason VARCHAR(255) DEFAULT NULL,
+  decided_by INT DEFAULT NULL,
+  decided_at DATETIME DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_cc_group (group_id, status),
+  INDEX idx_cc_user (user_id, status),
+  INDEX idx_cc_receiver (receiver_id, status),
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE CASCADE,
+  FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Only needed if you ALREADY ran cash_claims_migration.sql before this change.
+-- (A fresh install of the updated cash_claims_migration.sql already has this column.)
+-- Run in phpMyAdmin BEFORE replacing the backend files, then append to migrations/migrations.sql.
+
+ALTER TABLE cash_claims
+  ADD COLUMN IF NOT EXISTS dismissed_by_payer TINYINT(1) NOT NULL DEFAULT 0 AFTER reject_reason;
+
+  -- Secretary tools: meetings, attendance, minutes and group notices
+-- Run in phpMyAdmin BEFORE replacing the backend files, then append this block to migrations/migrations.sql.
+-- (The 'secretary' role already exists in group_members.role, so nothing to change there.)
+
+CREATE TABLE IF NOT EXISTS meetings (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  title VARCHAR(120) NOT NULL,
+  meeting_date DATETIME NOT NULL,
+  venue VARCHAR(150) DEFAULT NULL,
+  agenda TEXT DEFAULT NULL,
+  minutes MEDIUMTEXT DEFAULT NULL,
+  minutes_updated_at DATETIME DEFAULT NULL,
+  status ENUM('scheduled', 'held', 'cancelled') NOT NULL DEFAULT 'scheduled',
+  created_by INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_meetings_group (group_id, meeting_date),
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS meeting_attendance (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  meeting_id INT NOT NULL,
+  user_id INT NOT NULL,
+  status ENUM('present', 'apology', 'absent') NOT NULL,
+  marked_by INT DEFAULT NULL,                 -- the secretary / chair who marked it, or the member themself for an apology
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_attendance (meeting_id, user_id),
+  FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (marked_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS announcements (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  title VARCHAR(120) NOT NULL,
+  body TEXT NOT NULL,
+  created_by INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_announcements_group (group_id, created_at),
+  FOREIGN KEY (group_id) REFERENCES groups_table(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+);

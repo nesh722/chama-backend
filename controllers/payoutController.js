@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { logActivity } = require('../utils/activityLogService');
 const { runOnce, RequestError, validKey } = require('../utils/idempotency');
+const { assertPayoutsActive, requireApproval, markApprovalUsed } = require('../utils/payoutApproval');
 
 // Helper: check membership + role
 async function getMembership(groupId, userId) {
@@ -115,6 +116,7 @@ exports.markPayout = async (req, res) => {
     if (role !== 'treasurer' && role !== 'chair') {
       return res.status(403).json({ success: false, message: 'Only treasurer or chair can mark a payout' });
     }
+    await assertPayoutsActive(group_id); // every payout needs a second approver, so the group needs two
 
     const { replayed, payload } = await runOnce(
       { key: idempotency_key, userId: requesterId, endpoint: 'mark_payout' },
@@ -131,9 +133,27 @@ exports.markPayout = async (req, res) => {
         }
         const next = nextRows[0];
 
+        // An M-Pesa transfer for this turn that is in flight (or sent but not recorded yet) must finish first,
+        // otherwise the same payout could be recorded twice
+        try {
+          const [b2cBusy] = await conn.query(
+            `SELECT id FROM mpesa_b2c_transactions
+             WHERE purpose = 'payout' AND reference_id = ? AND status IN ('pending', 'success') LIMIT 1`,
+            [next.id]
+          );
+          if (b2cBusy.length > 0) {
+            throw new RequestError(409, 'An M-Pesa transfer for this payout is in progress or already sent. Check its status instead of marking it by hand.');
+          }
+        } catch (b2cErr) {
+          if (b2cErr.code !== 'ER_NO_SUCH_TABLE') throw b2cErr; // table not created yet: nothing to check
+        }
+
         const [groupRows] = await conn.query('SELECT contribution_amount FROM groups_table WHERE id = ?', [group_id]);
         const [countRows] = await conn.query('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?', [group_id]);
         const payoutAmount = parseFloat(groupRows[0].contribution_amount) * countRows[0].count;
+
+        // A different treasurer or chair must have approved this exact payout
+        const approval = await requireApproval(conn, { rotationId: next.id, amount: payoutAmount });
 
         const [updated] = await conn.query(
           'UPDATE payout_rotations SET has_received = TRUE, received_at = NOW() WHERE id = ? AND has_received = FALSE',
@@ -142,6 +162,7 @@ exports.markPayout = async (req, res) => {
         if (updated.affectedRows === 0) {
           throw new RequestError(409, 'That payout was just recorded. Please refresh.');
         }
+        await markApprovalUsed(conn, approval.id); // one approval pays out one turn, once
 
         await conn.query(
           'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',

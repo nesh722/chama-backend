@@ -134,15 +134,29 @@ async function b2cPayment({ requestRef, phone, amount, remarks, occasion, comman
   };
   if (B2C_PATH.includes('/v3/')) body.OriginatorConversationID = requestRef;
 
-  const res = await fetch(`${BASE_URL}${B2C_PATH}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  // Money is going OUT, so the caller must be able to tell "M-Pesa said no" (safe to retry) apart from
+  // "we don't know if M-Pesa got it" (NOT safe to retry blindly). The second kind is tagged `ambiguous`.
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${B2C_PATH}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch (netErr) {
+    const err = new Error('Could not confirm whether M-Pesa received the request (network problem).');
+    err.ambiguous = true;
+    throw err;
+  }
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || String(data.ResponseCode) !== '0') {
-    throw new Error(data.errorMessage || data.ResponseDescription || 'M-Pesa B2C request failed');
+  const data = await res.json().catch(() => null);
+  if (res.status >= 500 || (res.ok && data === null)) {
+    const err = new Error('M-Pesa gave an unclear answer, so it is not known whether the transfer was started.');
+    err.ambiguous = true;
+    throw err;
+  }
+  if (!res.ok || !data || String(data.ResponseCode) !== '0') {
+    throw new Error((data && (data.errorMessage || data.ResponseDescription)) || 'M-Pesa B2C request failed');
   }
   return data;
 }
@@ -164,7 +178,7 @@ function parseB2CResult(body) {
     originatorConversationId: r.OriginatorConversationID || null,
     resultCode: Number(r.ResultCode),
     resultDesc: r.ResultDesc || '',
-    receipt: meta.TransactionReceipt || r.TransactionID || null,
+    receipt: Number(r.ResultCode) === 0 ? meta.TransactionReceipt || r.TransactionID || null : null, // failures carry a dummy receipt that must not be stored
     amount: meta.TransactionAmount !== undefined ? Number(meta.TransactionAmount) : null,
     receiverName: meta.ReceiverPartyPublicName ? String(meta.ReceiverPartyPublicName) : null
   };
