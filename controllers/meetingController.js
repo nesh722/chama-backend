@@ -36,7 +36,7 @@ async function tellMembers(groupId, exceptUserId, title, message) {
     for (const m of members) {
       if (Number(m.user_id) === Number(exceptUserId)) continue;
       try {
-        await createNotification(m.user_id, title, message, groupId);
+        await createNotification(m.user_id, title, message);
       } catch (err) {
         console.log('Meeting notification failed:', err.message);
       }
@@ -351,6 +351,42 @@ exports.apology = async (req, res) => {
       [meeting.id, userId, userId, reason || null]
     );
     res.json({ success: true, message: 'Apology sent' });
+  } catch (err) {
+    sendError(res, err);
+  }
+};
+
+// GET /api/meetings/upcoming  -> the next few scheduled meetings across all my groups (for the Home screen)
+exports.upcomingForMe = async (req, res) => {
+  try {
+    const userId = Number(req.user.userId);
+    const [rows] = await db.query(
+      `SELECT m.*, g.name AS group_name
+       FROM meetings m
+       JOIN group_members gm ON gm.group_id = m.group_id
+       JOIN groups_table g ON g.id = m.group_id
+       WHERE gm.user_id = ? AND m.status = 'scheduled'
+       ORDER BY m.meeting_date ASC LIMIT 100`,
+      [userId]
+    );
+    const [apologies] = await db.query(`SELECT meeting_id FROM meeting_attendance WHERE user_id = ? AND status = 'apology'`, [userId]);
+    const apologised = new Set(apologies.map((a) => Number(a.meeting_id)));
+
+    const cutoff = Date.now() - 3 * 60 * 60 * 1000;
+    const meetings = rows
+      .filter((m) => new Date(m.meeting_date).getTime() >= cutoff)
+      .slice(0, 5)
+      .map((m) => ({
+        id: m.id,
+        groupId: m.group_id,
+        groupName: m.group_name,
+        title: m.title,
+        meetingDate: m.meeting_date,
+        venue: m.venue,
+        apologySent: apologised.has(Number(m.id))
+      }));
+
+    res.json({ success: true, meetings });
   } catch (err) {
     sendError(res, err);
   }
