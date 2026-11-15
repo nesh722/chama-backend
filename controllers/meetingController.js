@@ -1,4 +1,3 @@
-// controllers/meetingController.js
 // The secretary's tools. Secretary (and chair) schedule meetings, mark attendance and write the minutes.
 // Every member can read them and send an apology. Nobody here can move money or approve anything.
 
@@ -8,7 +7,7 @@ const { logActivity } = require('../utils/activityLogService');
 const { createNotification } = require('./notificationController');
 
 const ATTENDANCE = ['present', 'apology', 'absent'];
-const MARK_FROM_HOURS_BEFORE = 12; // attendance and minutes can be recorded from half a day before the meeting
+const MARK_FROM_HOURS_BEFORE = 0; // attendance and minutes can only be recorded once the meeting has started
 const MAX_MINUTES_LENGTH = 20000;
 
 const canRecord = (role) => role === 'secretary' || role === 'chair';
@@ -36,7 +35,7 @@ async function tellMembers(groupId, exceptUserId, title, message) {
     for (const m of members) {
       if (Number(m.user_id) === Number(exceptUserId)) continue;
       try {
-        await createNotification(m.user_id, title, message);
+        await createNotification(m.user_id, title, message, groupId);
       } catch (err) {
         console.log('Meeting notification failed:', err.message);
       }
@@ -245,7 +244,7 @@ function assertCanRecordNow(meeting) {
   if (meeting.status === 'cancelled') throw new RequestError(409, 'This meeting was cancelled');
   const earliest = new Date(meeting.meeting_date).getTime() - MARK_FROM_HOURS_BEFORE * 60 * 60 * 1000;
   if (Date.now() < earliest) {
-    throw new RequestError(409, 'This can be recorded from the day of the meeting');
+    throw new RequestError(409, 'Attendance and minutes can be recorded once the meeting has started');
   }
 }
 
@@ -256,6 +255,9 @@ exports.saveAttendance = async (req, res) => {
     const records = req.body.records;
     if (!Array.isArray(records) || records.length === 0 || records.length > 500) {
       return res.status(400).json({ success: false, message: 'Send the attendance as a list' });
+    }
+    if (!records.some((r) => r && r.status && r.status !== 'none')) {
+      return res.status(400).json({ success: false, message: 'Mark at least one member before saving the attendance' });
     }
 
     const conn = await db.getConnection();
@@ -308,6 +310,9 @@ exports.saveMinutes = async (req, res) => {
     assertCanRecordNow(meeting);
 
     const minutes = typeof req.body.minutes === 'string' ? req.body.minutes.trim() : '';
+    if (!minutes) {
+      return res.status(400).json({ success: false, message: 'Write the minutes before saving' });
+    }
     if (minutes.length > MAX_MINUTES_LENGTH) {
       return res.status(400).json({ success: false, message: `The minutes can be at most ${MAX_MINUTES_LENGTH} characters` });
     }
