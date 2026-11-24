@@ -11,63 +11,13 @@ async function getMembership(groupId, userId) {
   return rows.length > 0 ? rows[0].role : null;
 }
 
-// LOG EXTRA SAVINGS (voluntary, not tied to a contribution cycle)
+// Cash savings now go through a cash claim (kind 'extra_savings') that a treasurer / chair confirms.
+// M-Pesa savings are recorded automatically by the M-Pesa callback.
 exports.logSavings = async (req, res) => {
-  try {
-    const { group_id, amount, note, idempotency_key } = req.body;
-    const userId = req.user.userId;
-    const deposit = parseFloat(amount);
-
-    if (!group_id || !deposit || deposit <= 0) {
-      return res.status(400).json({ success: false, message: 'group_id and a positive amount are required' });
-    }
-    if (!validKey(idempotency_key)) {
-      return res.status(400).json({ success: false, message: 'Invalid idempotency_key' });
-    }
-
-    const role = await getMembership(group_id, userId);
-    if (!role) {
-      return res.status(403).json({ success: false, message: 'You are not a member of this group' });
-    }
-
-    const { replayed, payload } = await runOnce(
-      { key: idempotency_key, userId, endpoint: 'log_savings' },
-      async (conn) => {
-        const [result] = await conn.query(
-          'INSERT INTO savings_deposits (group_id, user_id, amount, note) VALUES (?, ?, ?, ?)',
-          [group_id, userId, deposit, note || null]
-        );
-        await conn.query(
-          'INSERT INTO transactions (group_id, user_id, type, amount, reference_id) VALUES (?, ?, ?, ?, ?)',
-          [group_id, userId, 'savings', deposit, result.insertId]
-        );
-        return { success: true, message: 'Savings logged successfully', depositId: result.insertId };
-      }
-    );
-
-    if (replayed) return res.status(200).json({ ...payload, duplicate: true });
-
-    try {
-      await logActivity({
-        userId,
-        groupId: group_id,
-        actionType: 'logged_savings',
-        description: note
-          ? `You saved an extra KES ${deposit} — ${note}`
-          : `You saved an extra KES ${deposit}`,
-        amount: deposit
-      });
-    } catch (logErr) {
-      console.log('Activity log failed:', logErr.message);
-    }
-
-    res.status(201).json(payload);
-  } catch (err) {
-    if (err instanceof RequestError) {
-      return res.status(err.status).json({ success: false, message: err.message });
-    }
-    res.status(500).json({ success: false, error: err.message });
-  }
+  res.status(410).json({
+    success: false,
+    message: 'Cash savings now need to be confirmed by the treasurer or chair who received them. Update the app and use "I paid cash".'
+  });
 };
 
 // GET ALL EXTRA SAVINGS FOR A GROUP (with member names)

@@ -61,3 +61,12 @@ exports.sendNotificationLimiter = rateLimit({
   keyGenerator: (req) => `user-${req.user.userId}`,
   message: { success: false, message: 'You have sent too many notifications. Please try again later.' }
 });
+
+// Two-step codes and switching 2FA on/off: 15 tries per 15 minutes per IP
+exports.twoFactorLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 15,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many attempts. Please wait 15 minutes and try again.' }
+});

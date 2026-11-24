@@ -263,7 +263,8 @@ async function announce(row, d) {
     await createNotification(
       row.user_id,
       'M-Pesa Payment Received',
-      `Your M-Pesa payment of KES ${amt}${row.mpesa_receipt ? ` (${row.mpesa_receipt})` : ''} was received and recorded as ${recordedAs}.`
+      `Your M-Pesa payment of KES ${amt}${row.mpesa_receipt ? ` (${row.mpesa_receipt})` : ''} was received and recorded as ${recordedAs}.`,
+       row.group_id
     );
   } catch (err) {
     console.log('M-Pesa post-payment notices failed:', err.message);

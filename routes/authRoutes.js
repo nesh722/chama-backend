@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const twoFactorController = require('../controllers/twoFactorController');
 const authMiddleware = require('../middleware/authMiddleware');
-const { resetRequestLimiter, resetAttemptLimiter, loginLimiter,
-  loginAccountLimiter } = require('../middleware/rateLimiters');
+const { resetRequestLimiter, resetAttemptLimiter, loginLimiter, loginAccountLimiter, twoFactorLimiter } = require('../middleware/rateLimiters');
 
 router.post('/register', authController.register);
 router.post('/login', loginLimiter, loginAccountLimiter, authController.login);
@@ -17,4 +17,9 @@ router.put('/change-password', authMiddleware, authController.changePassword);
 router.delete('/delete-account', authMiddleware, authController.deleteAccount);
 router.post('/push-token', authMiddleware, authController.savePushToken);
 router.delete('/push-token', authMiddleware, authController.clearPushToken);
+router.post('/login/verify', twoFactorLimiter, twoFactorController.verifyLogin);
+router.post('/login/resend', twoFactorLimiter, twoFactorController.resendLogin);
+router.post('/2fa/enable/start', authMiddleware, twoFactorLimiter, twoFactorController.startEnable);
+router.post('/2fa/enable/confirm', authMiddleware, twoFactorLimiter, twoFactorController.confirmEnable);
+router.post('/2fa/disable', authMiddleware, twoFactorLimiter, twoFactorController.disable);
 module.exports = router;

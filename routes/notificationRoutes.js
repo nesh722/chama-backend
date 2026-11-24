@@ -6,6 +6,7 @@ const { sendNotificationLimiter } = require('../middleware/rateLimiters');
 
 router.get('/my-notifications', authMiddleware, notificationController.getMyNotifications);
 router.delete('/clear', authMiddleware, notificationController.clearAllNotifications);
+router.patch('/read-all', authMiddleware, notificationController.markAllAsRead);
 router.patch('/:id/read', authMiddleware, notificationController.markAsRead);
 router.post('/send', authMiddleware, sendNotificationLimiter, notificationController.sendNotification);
 

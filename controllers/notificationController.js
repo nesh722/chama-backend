@@ -134,4 +134,18 @@ exports.clearAllNotifications = async (req, res) => {
   }
 };
 
+// PATCH /api/notifications/read-all  (marks every unread notification of the logged-in user as read)
+exports.markAllAsRead = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [result] = await db.query(
+      'UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0',
+      [userId]
+    );
+    res.json({ success: true, updated: result.affectedRows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 exports.createNotification = createNotification; // exported so other controllers can reuse it later

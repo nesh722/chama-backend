@@ -6,6 +6,9 @@ const { sendPasswordResetEmail } = require('../utils/emailService');
 const multer = require('multer');
 const path = require('path');
 const { MIN_APPROVERS } = require('../utils/approvers');
+const { CODE_MINUTES, minutesLocked, registerFailedLogin, clearLoginFailures, createCode, isApprover, maskEmail } = require('../utils/loginSecurity');
+const { sendLoginCode, sendLockoutNotice } = require('../utils/securityMail');
+const { makeChallengeToken } = require('./twoFactorController');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/avatars/'),
@@ -88,15 +91,66 @@ exports.login = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email and password required' });
     }
 
-    const [rows] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+    const [rows] = await db.query(
+      `SELECT *, (locked_until IS NOT NULL AND locked_until > NOW()) AS is_locked,
+              GREATEST(CEIL(TIMESTAMPDIFF(SECOND, NOW(), locked_until) / 60), 1) AS minutes_left
+       FROM users WHERE email = ?`,
+      [email]
+    );
     if (rows.length === 0) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
-
     const user = rows[0];
+
+    // Locked accounts are refused before the password is even checked
+    const lockedFor = minutesLocked(user);
+    if (lockedFor) {
+      return res.status(423).json({
+        success: false,
+        locked: true,
+        message: `Too many wrong attempts. This account is locked for ${lockedFor} more minute(s). You can also reset your password.`
+      });
+    }
+
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      const r = await registerFailedLogin(user.id);
+      if (r.locked) {
+        try { await sendLockoutNotice(user.email, r.minutes); } catch (e) { console.log('Lockout email failed:', e.message); }
+        return res.status(423).json({
+          success: false,
+          locked: true,
+          message: `Too many wrong attempts. This account is locked for ${r.minutes} minutes. We emailed you.`
+        });
+      }
+      return res.status(401).json({
+        success: false,
+        message: r.attemptsLeft <= 2
+          ? `Invalid credentials. ${r.attemptsLeft} attempt(s) left before this account is locked.`
+          : 'Invalid credentials'
+      });
+    }
+
+    await clearLoginFailures(user.id);
+
+    // Two-step login: password is right, now an emailed code is needed
+    if (user.two_factor_enabled) {
+      const made = await createCode(user.id, 'login');
+      if (made.tooMany) {
+        return res.status(429).json({ success: false, message: 'Too many codes requested. Please wait 15 minutes.' });
+      }
+      try {
+        await sendLoginCode(user.email, made.code, CODE_MINUTES, 'logging in');
+      } catch (mailErr) {
+        console.log('Login code email failed:', mailErr.message);
+        return res.status(502).json({ success: false, message: 'Could not send the code to your email. Try again shortly.' });
+      }
+      return res.json({
+        success: true,
+        twoFactorRequired: true,
+        challenge_token: makeChallengeToken(user.id),
+        email_hint: maskEmail(user.email)
+      });
     }
 
     const token = jwt.sign(
@@ -108,7 +162,9 @@ exports.login = async (req, res) => {
     res.json({
       success: true,
       token,
-      user: { id: user.id, full_name: user.full_name, email: user.email }
+      // treasurers and chairs have to switch two-step login on; the app uses this to send them there
+      twoFactorSetupRequired: await isApprover(user.id),
+      user: { id: user.id, full_name: user.full_name, email: user.email, two_factor_enabled: false }
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -119,13 +175,15 @@ exports.login = async (req, res) => {
 exports.getProfile = async (req, res) => {
   try {
     const [rows] = await db.query(
-     'SELECT id, full_name, email, phone, avatar_url, created_at FROM users WHERE id = ?',
+     'SELECT id, full_name, email, phone, avatar_url, created_at, two_factor_enabled FROM users WHERE id = ?',
       [req.user.userId]
     );
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    res.json({ success: true, user: rows[0] });
+    const user = rows[0];
+    user.two_factor_required = await isApprover(req.user.userId);
+    res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -161,6 +219,7 @@ exports.requestPasswordReset = async (req, res) => {
 
     // Invalidate any earlier unused codes so only the newest one works
     await db.query('UPDATE password_resets SET used = TRUE WHERE user_id = ? AND used = FALSE', [userId]);
+    await clearLoginFailures(reset.user_id); // a reset proves control of the email, so lift any lockout
 
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
@@ -222,6 +281,35 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
+// Checks the current password on a settings screen. Wrong guesses count toward the same lockout as login,
+// so a stolen session cannot be used to guess the password without limit.
+async function currentPasswordOk(res, userId, password) {
+  const [rows] = await db.query(
+    `SELECT password_hash, email, (locked_until IS NOT NULL AND locked_until > NOW()) AS is_locked,
+            GREATEST(CEIL(TIMESTAMPDIFF(SECOND, NOW(), locked_until) / 60), 1) AS minutes_left
+     FROM users WHERE id = ?`,
+    [userId]
+  );
+  const user = rows[0];
+  const lockedFor = minutesLocked(user);
+  if (lockedFor) {
+    res.status(423).json({ success: false, locked: true, message: `Too many wrong attempts. This account is locked for ${lockedFor} more minute(s).` });
+    return false;
+  }
+  if (await bcrypt.compare(password, user.password_hash)) {
+    await clearLoginFailures(userId);
+    return true;
+  }
+  const r = await registerFailedLogin(userId);
+  if (r.locked) {
+    try { await sendLockoutNotice(user.email, r.minutes); } catch (e) { console.log('Lockout email failed:', e.message); }
+    res.status(423).json({ success: false, locked: true, message: `Too many wrong attempts. This account is locked for ${r.minutes} minutes.` });
+  } else {
+    res.status(400).json({ success: false, message: 'Current password is incorrect' });
+  }
+  return false;
+}
+
 // CHANGE EMAIL (requires current password)
 exports.changeEmail = async (req, res) => {
   try {
@@ -232,11 +320,7 @@ exports.changeEmail = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Current password and new email are required' });
     }
 
-    const [users] = await db.query('SELECT password_hash FROM users WHERE id = ?', [userId]);
-    const match = await bcrypt.compare(current_password, users[0].password_hash);
-    if (!match) {
-      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
-    }
+    if (!(await currentPasswordOk(res, userId, current_password))) return;
 
     const [existing] = await db.query('SELECT id FROM users WHERE email = ? AND id != ?', [new_email, userId]);
     if (existing.length > 0) {
@@ -264,11 +348,7 @@ exports.changePassword = async (req, res) => {
       return res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
     }
 
-    const [users] = await db.query('SELECT password_hash FROM users WHERE id = ?', [userId]);
-    const match = await bcrypt.compare(current_password, users[0].password_hash);
-    if (!match) {
-      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
-    }
+    if (!(await currentPasswordOk(res, userId, current_password))) return;
 
     const newHash = await bcrypt.hash(new_password, 10);
     await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, userId]);

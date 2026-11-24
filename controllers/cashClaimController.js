@@ -4,8 +4,9 @@ const { recordContribution, applyRepayment, loanBalances } = require('../utils/p
 const { accrueLoanInterest, round2 } = require('../utils/loanInterest');
 const { logActivity } = require('../utils/activityLogService');
 const { createNotification } = require('./notificationController');
+const { insertSavingsDeposit } = require('../utils/savingsDeposit');
 
-const KINDS = ['contribution', 'loan_repayment'];
+const KINDS = ['contribution', 'loan_repayment', 'extra_savings'];
 const MAX_AMOUNT = 99999999;
 
 const isApprover = (role) => role === 'treasurer' || role === 'chair';
@@ -54,6 +55,7 @@ exports.create = async (req, res) => {
   try {
     const userId = Number(req.user.userId);
     const { group_id, kind, loan_id, amount, receiver_id } = req.body;
+    const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0, 255) : '';
 
     if (!group_id || !KINDS.includes(kind)) {
       return res.status(400).json({ success: false, message: 'group_id and a valid kind are required' });
@@ -124,8 +126,8 @@ exports.create = async (req, res) => {
       }
 
       const [ins] = await conn.query(
-        'INSERT INTO cash_claims (group_id, user_id, kind, loan_id, claimed_amount, receiver_id) VALUES (?, ?, ?, ?, ?, ?)',
-        [group_id, userId, kind, loanId, paying, receiverId]
+        'INSERT INTO cash_claims (group_id, user_id, kind, loan_id, claimed_amount, receiver_id, note) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [group_id, userId, kind, loanId, paying, receiverId, note || null]
       );
       claimId = ins.insertId;
       await conn.commit();
@@ -140,7 +142,7 @@ exports.create = async (req, res) => {
     await tell(
       receiverId,
       'Cash Payment To Confirm',
-      `${payerName} says they handed you KES ${money(paying)} in cash ${kind === 'loan_repayment' ? 'for their loan' : 'for their contribution'}. Open the group to confirm what you received.`
+      `${payerName} says they handed you KES ${money(paying)} in cash ${kind === 'loan_repayment' ? 'for their loan' : kind === 'extra_savings' ? 'as extra savings' : 'for their contribution'}. Open the group to confirm what you received.`
         ,group_id
     );
 
@@ -164,7 +166,7 @@ exports.listForGroup = async (req, res) => {
 
     const [rows] = await db.query(
       `SELECT c.id, c.kind, c.loan_id, c.user_id, c.receiver_id, c.claimed_amount, c.confirmed_amount, c.status,
-              c.reject_reason, c.dismissed_by_payer, c.created_at, c.decided_at,
+              c.reject_reason, c.note, c.dismissed_by_payer, c.created_at, c.decided_at,
               p.full_name AS payer_name, r.full_name AS receiver_name
        FROM cash_claims c
        JOIN users p ON p.id = c.user_id
@@ -187,6 +189,7 @@ exports.listForGroup = async (req, res) => {
       confirmedAmount: c.confirmed_amount === null ? null : Number(c.confirmed_amount),
       status: c.status,
       rejectReason: c.reject_reason,
+      note: c.note,
       dismissed: !!c.dismissed_by_payer,
       createdAt: c.created_at,
       decidedAt: c.decided_at,
@@ -294,6 +297,9 @@ exports.confirm = async (req, res) => {
 
       if (claim.kind === 'contribution') {
         result = await recordContribution(conn, { groupId: claim.group_id, userId: claim.user_id, paying: confirmed });
+      } else if (claim.kind === 'extra_savings') {
+        await insertSavingsDeposit(conn, { groupId: claim.group_id, userId: claim.user_id, amount: confirmed, note: claim.note });
+        result = {};
       } else {
         result = await applyRepayment(conn, { loanId: claim.loan_id, amount: confirmed });
       }
@@ -329,6 +335,20 @@ exports.confirm = async (req, res) => {
         claim.user_id,
         'Cash Payment Confirmed',
         `${receiverName} confirmed your cash contribution of KES ${money(confirmed)}${adjustedNote}.`
+        ,claim.group_id
+      );
+      } else if (claim.kind === 'extra_savings') {
+      await logSafely({
+        userId: claim.user_id,
+        groupId: claim.group_id,
+        actionType: 'logged_savings',
+        description: `You saved an extra KES ${money(confirmed)} in cash, confirmed by ${receiverName}${claim.note ? ` — ${claim.note}` : ''}`,
+        amount: confirmed
+      });
+      await tell(
+        claim.user_id,
+        'Cash Payment Confirmed',
+        `${receiverName} confirmed your cash extra savings of KES ${money(confirmed)}${adjustedNote}.`
         ,claim.group_id
       );
     } else {

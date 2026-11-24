@@ -2,11 +2,12 @@ const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/mpesaB2CController');
 const authMiddleware = require('../middleware/authMiddleware');
+const requireTwoFactor = require('../middleware/requireTwoFactor');
 
-router.post('/send', authMiddleware, controller.send);
+router.post('/send', authMiddleware, requireTwoFactor, controller.send);
 router.get('/group/:groupId', authMiddleware, controller.listForGroup);
 router.get('/status/:id', authMiddleware, controller.status);
-router.post('/release/:id', authMiddleware, controller.release);
+router.post('/release/:id', authMiddleware, requireTwoFactor, controller.release);
 
 // Called by Safaricom, so they can't carry a login token. The secret in the URL protects them.
 router.post('/result/:secret', controller.result);
